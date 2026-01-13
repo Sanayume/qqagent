@@ -26,7 +26,7 @@ build/
 # Logs
 *.log
 log.txt
-
+implementation_plan.md
 # Databases
 data/*.db
 *.sqlite
@@ -44,7 +44,7 @@ tmp*/
 
 # Pytest
 .pytest_cache/
-
+tests/
 # User Requested Ignores
 test_*.py
 mcp_servers.json
