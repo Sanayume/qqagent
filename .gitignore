@@ -1,0 +1,52 @@
+# Environment Variables
+.env
+.env.local
+
+# Secrets and Sensitive Configs
+config/secrets.yaml
+# Assuming config.yaml might contain sensitive info if not purely structural. 
+# But usually config.yaml is safe, just checking if user wants it ignored. 
+# User said "sensitive configuration files". I'll stick to .env for now unless instructed otherwise.
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv/
+*.egg-info/
+.coverage
+htmlcov/
+dist/
+build/
+
+# Logs
+*.log
+log.txt
+
+# Databases
+data/*.db
+*.sqlite
+*.sqlite3
+
+# Project Specific
+mcpserver/
+tmp*/
+.claude/
+
+# IDE
+.vscode/
+.idea/
+.DS_Store
+
+# Pytest
+.pytest_cache/
+
+# User Requested Ignores
+test_*.py
+mcp_servers.json
+!README.md
+!.env.example

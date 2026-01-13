@@ -1,0 +1,11 @@
+session:
+  global_users: [123456]
+  per_user_groups: []
+  all_groups_per_user: false
+
+presets:
+  default:
+    system_prompt: "Config loaded from YAML!"
+
+plugins:
+  weather: true
