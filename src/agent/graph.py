@@ -6,7 +6,7 @@ LangGraph Agent 图定义
 """
 
 from typing import Literal
-from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, BaseMessage
+from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, ToolMessage, BaseMessage
 from langchain_openai import ChatOpenAI
 from langgraph.graph import StateGraph, END
 from langgraph.prebuilt import ToolNode
@@ -15,6 +15,103 @@ from src.agent.state import AgentState, ChatResponse
 from src.agent.tools import DEFAULT_TOOLS
 from src.core.llm_message import extract_tool_images
 from src.utils.logger import log
+
+
+def sanitize_messages_for_api(messages: list[BaseMessage]) -> list[BaseMessage]:
+    """清理消息列表，使其兼容不支持完整 tool calling 历史的 API
+
+    某些 API 代理不支持 OpenAI 的 ToolMessage 格式。
+    此函数将历史中的工具调用转换为纯文本，但保留当前轮次的工具调用。
+
+    策略:
+    - 找到最后一个 HumanMessage，之后的内容是"当前轮次"
+    - 当前轮次的 AIMessage(tool_calls) 和 ToolMessage 保持不变（工具循环需要）
+    - 历史轮次的 AIMessage(tool_calls) -> 转为纯文本 AIMessage
+    - 历史轮次的 ToolMessage -> 合并到前一个 AIMessage 或转为 AIMessage
+    """
+    if not messages:
+        return messages
+
+    # 找到最后一个 HumanMessage 的位置
+    last_human_idx = -1
+    for i, msg in enumerate(messages):
+        if isinstance(msg, HumanMessage):
+            last_human_idx = i
+
+    # 如果没有 HumanMessage，不处理
+    if last_human_idx == -1:
+        return messages
+
+    # 分离历史和当前轮次
+    history = messages[:last_human_idx]
+    current_round = messages[last_human_idx:]
+
+    # 检查历史中是否有需要清理的消息
+    has_tool_messages = any(isinstance(m, ToolMessage) for m in history)
+    has_tool_calls = any(
+        isinstance(m, AIMessage) and hasattr(m, 'tool_calls') and m.tool_calls
+        for m in history
+    )
+
+    if not has_tool_messages and not has_tool_calls:
+        # 历史中没有工具相关消息，直接返回
+        return messages
+
+    log.debug(f"Sanitizing {len(history)} history messages (has_tool_messages={has_tool_messages}, has_tool_calls={has_tool_calls})")
+
+    # 清理历史消息
+    sanitized_history = []
+    pending_tool_results = []  # 暂存 ToolMessage 内容
+
+    for msg in history:
+        if isinstance(msg, ToolMessage):
+            # 收集工具结果
+            tool_name = getattr(msg, 'name', None) or msg.tool_call_id or 'tool'
+            content = msg.content if isinstance(msg.content, str) else str(msg.content)
+            # 截断过长的内容
+            if len(content) > 200:
+                content = content[:200] + "..."
+            pending_tool_results.append(f"[{tool_name}结果: {content}]")
+
+        elif isinstance(msg, AIMessage):
+            # 处理 AIMessage
+            if hasattr(msg, 'tool_calls') and msg.tool_calls:
+                # 有工具调用的 AIMessage，转为纯文本
+                tool_names = [tc.get('name', 'unknown') for tc in msg.tool_calls]
+                text_content = msg.content or ""
+
+                # 添加之前的工具结果
+                if pending_tool_results:
+                    text_content = (text_content + " " if text_content else "") + " ".join(pending_tool_results)
+                    pending_tool_results = []
+
+                # 如果没有任何文本内容，添加工具调用描述
+                if not text_content.strip():
+                    text_content = f"[调用了工具: {', '.join(tool_names)}]"
+
+                sanitized_history.append(AIMessage(content=text_content))
+            else:
+                # 普通 AIMessage
+                # 先添加之前的工具结果
+                if pending_tool_results:
+                    sanitized_history.append(AIMessage(content=" ".join(pending_tool_results)))
+                    pending_tool_results = []
+                sanitized_history.append(msg)
+        else:
+            # 其他消息类型（HumanMessage, SystemMessage）
+            # 先添加之前的工具结果
+            if pending_tool_results:
+                sanitized_history.append(AIMessage(content=" ".join(pending_tool_results)))
+                pending_tool_results = []
+            sanitized_history.append(msg)
+
+    # 处理剩余的工具结果
+    if pending_tool_results:
+        sanitized_history.append(AIMessage(content=" ".join(pending_tool_results)))
+
+    log.debug(f"Sanitized history: {len(history)} -> {len(sanitized_history)} messages")
+
+    return sanitized_history + current_round
 
 
 def create_llm(
@@ -148,20 +245,23 @@ def create_agent_graph(
     tool_node = ToolNode(tools)
     
     # ==================== 节点函数 ====================
-    
+
     def call_model(state: AgentState) -> dict:
         """调用 LLM 生成回复"""
         messages = list(state["messages"])
-        
+
         # 如果有系统提示词，确保它在最前面
         system_prompt = state.get("system_prompt", "")
         if system_prompt:
             # 检查是否已有系统消息
             if not messages or not isinstance(messages[0], SystemMessage):
                 messages.insert(0, SystemMessage(content=system_prompt))
-        
+
+        # 清理历史消息，兼容不支持 ToolMessage 格式的 API
+        messages = sanitize_messages_for_api(messages)
+
         log.debug(f"Calling LLM with {len(messages)} messages")
-        
+
         # 调用 LLM
         response = llm_with_tools.invoke(messages)
         
@@ -255,16 +355,24 @@ class QQAgent:
         log.info(f"Initializing QQAgent with model: {model}")
 
         # 创建 Agent 图
-        self.graph = create_agent_graph(
-            model=model,
-            api_key=api_key,
-            base_url=base_url,
-            tools=self._tools,
-        )
+        self.graph = self._create_graph()
 
         # 使用外部存储或内部字典
         self._memory_store = memory_store
         self._internal_sessions: dict[str, list] | None = None if memory_store else {}
+
+    def _create_graph(self):
+        """创建 LangGraph Agent 图
+        
+        用于初始化或热重载时重新创建 graph。
+        """
+        log.debug(f"Creating agent graph with model={self.model}, base_url={self.base_url[:30] if self.base_url else 'default'}...")
+        return create_agent_graph(
+            model=self.model,
+            api_key=self.api_key,
+            base_url=self.base_url,
+            tools=self._tools,
+        )
 
     def _generate_tools_description(self) -> str:
         """生成工具描述，附加到 system prompt"""

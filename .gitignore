@@ -31,7 +31,7 @@ implementation_plan.md
 data/*.db
 *.sqlite
 *.sqlite3
-
+implementation_plan.md
 # Project Specific
 mcpserver/
 tmp*/
@@ -50,3 +50,7 @@ test_*.py
 mcp_servers.json
 !README.md
 !.env.example
+
+# Additional User Requested Ignores
+琪露诺.yaml
+tmpclaude*

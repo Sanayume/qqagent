@@ -8,7 +8,6 @@ LangGraph QQ Agent - 主程序
 import asyncio
 import os
 import re
-from dotenv import load_dotenv
 
 from src.adapters.onebot import OneBotAdapter, OneBotEvent
 from src.adapters.mcp import MCPManager
@@ -18,6 +17,7 @@ from src.memory import MemoryStore
 from src.presets import PresetManager
 from src.utils.config import load_settings
 from src.utils.config_loader import get_config_loader
+from src.utils.env_loader import get_env_loader
 from src.utils.logger import setup_logger, log
 
 # 导入 core 模块
@@ -26,8 +26,8 @@ from src.core.media import download_and_encode
 from src.core.llm_message import build_multimodal_message, build_context_message
 
 
-# 加载 .env 文件
-load_dotenv()
+# 加载 .env 文件 (使用 EnvLoader 支持热重载)
+env_loader = get_env_loader()
 
 
 # ==================== 消息处理辅助函数 ====================
@@ -60,8 +60,8 @@ async def fetch_reply_context(adapter: OneBotAdapter, reply_id: int) -> str | No
         return None
 
 
-async def fetch_forward_summary(adapter: OneBotAdapter, forward_id: str, max_nodes: int = 5) -> str | None:
-    """获取合并转发消息的摘要
+async def fetch_forward_content(adapter: OneBotAdapter, forward_id: str, max_nodes: int = 50) -> tuple[str | None, list[str]]:
+    """获取合并转发消息的内容和图片
 
     Args:
         adapter: OneBot 适配器
@@ -69,35 +69,74 @@ async def fetch_forward_summary(adapter: OneBotAdapter, forward_id: str, max_nod
         max_nodes: 最多获取的节点数
 
     Returns:
-        摘要字符串，失败返回 None
+        (摘要字符串, 图片URL列表)，失败返回 (None, [])
     """
+    log.debug(f"Fetching forward message, id={forward_id}")
     try:
         result = await adapter.get_forward_msg(forward_id)
+        log.debug(f"Forward API result status: {result.get('status')}, retcode: {result.get('retcode')}")
+        log.debug(f"Forward API raw data keys: {result.get('data', {}).keys() if result.get('data') else 'None'}")
+        log.debug(f"Forward API raw data: {str(result.get('data', {}))[:500]}")
+        
         if result.get("status") != "ok":
+            log.warning(f"Forward API failed: {result.get('msg', result.get('message', 'Unknown error'))}")
             return None
 
-        nodes = result.get("data", {}).get("message", [])
+        data = result.get("data", {})
+        # NapCat 可能返回 "messages" 而不是 "message"
+        nodes = data.get("message", data.get("messages", []))
+        log.debug(f"Forward message has {len(nodes)} nodes")
+        
+        if not nodes:
+            log.warning("Forward message has no nodes")
+            return None, []
+            
         summaries = []
+        all_image_urls = []
 
-        for node in nodes[:max_nodes]:
-            if node.get("type") == "node":
+        for i, node in enumerate(nodes[:max_nodes]):
+            node_type = node.get("type", "unknown")
+            log.debug(f"Processing node {i}: type={node_type}, keys={node.keys()}")
+            
+            # 尝试多种数据结构
+            # 结构1: {type: "node", data: {nickname, content}}
+            # 结构2: 直接 {nickname/user_id, content/message}
+            if node_type == "node":
                 node_data = node.get("data", {})
-                nickname = node_data.get("nickname", "某人")
-                content = node_data.get("content", "")
-                if isinstance(content, list):
-                    node_parsed = parse_segments(content)
-                    content = make_text_description(node_parsed)
-                summaries.append(f"{nickname}: {content[:50]}")
+            else:
+                # NapCat 可能直接返回数据，没有 type=node 包装
+                node_data = node
+            
+            nickname = node_data.get("nickname", node_data.get("sender", {}).get("nickname", "某人"))
+            content = node_data.get("content", node_data.get("message", ""))
+            
+            log.debug(f"Node {i} nickname={nickname}, content type={type(content).__name__}")
+            
+            if isinstance(content, list):
+                node_parsed = parse_segments(content)
+                # 提取图片 URL
+                if node_parsed.image_urls:
+                    all_image_urls.extend(node_parsed.image_urls)
+                    log.debug(f"Node {i} has {len(node_parsed.image_urls)} images")
+                content = make_text_description(node_parsed)
+            elif isinstance(content, str):
+                content = content.strip()
+            else:
+                content = str(content)[:200] if content else ""
+            
+            if nickname or content:
+                summaries.append(f"{nickname}: {content[:200]}")
+                log.debug(f"Node {i}: {nickname}: {content[:50]}...")
 
         if len(nodes) > max_nodes:
             summaries.append(f"...还有 {len(nodes) - max_nodes} 条消息")
 
         summary = "\n".join(summaries)
-        log.debug(f"Forward summary: {summary[:100]}...")
-        return summary
+        log.info(f"Forward content ({len(nodes)} nodes, {len(all_image_urls)} images): {summary[:100]}..." if len(summary) > 100 else f"Forward content: {summary}")
+        return summary, all_image_urls
     except Exception as e:
-        log.warning(f"Failed to get forward message: {e}")
-        return None
+        log.exception(f"Failed to get forward message: {e}")
+        return None, []
 
 
 async def download_message_images(image_urls: list[str], max_count: int = 3) -> list[tuple[str, str]]:
@@ -240,6 +279,24 @@ async def main():
 
     log.success("Agent created successfully")
     
+    # 注册 .env 热重载回调 (更新 LLM 配置)
+    def on_env_reload():
+        """当 .env 发生变化时，重新创建 LLM 实例"""
+        new_api_key = os.getenv("OPENAI_API_KEY", "")
+        new_base_url = os.getenv("OPENAI_API_BASE", "")
+        new_model = os.getenv("DEFAULT_MODEL", settings.llm.default_model)
+        
+        if new_api_key != agent.api_key or new_base_url != agent.base_url or new_model != agent.model:
+            log.info(f"Updating agent LLM config: model={new_model}, base_url={new_base_url[:30]}...")
+            agent.api_key = new_api_key
+            agent.base_url = new_base_url
+            agent.model = new_model
+            # 重新创建 graph 以应用新配置
+            agent.graph = agent._create_graph()
+            log.success("Agent LLM config updated!")
+    
+    env_loader.add_callback(on_env_reload)
+    
     # 创建 OneBot 适配器
     adapter = OneBotAdapter(
         ws_url=settings.onebot.ws_url,
@@ -312,15 +369,27 @@ async def main():
             # 获取上下文（引用消息、合并转发）
             reply_context = None
             forward_summary = None
+            forward_image_urls = []
 
             if parsed.has_reply() and parsed.reply_id:
                 reply_context = await fetch_reply_context(adapter, parsed.reply_id)
 
             if parsed.has_forward() and parsed.forward_id:
-                forward_summary = await fetch_forward_summary(adapter, parsed.forward_id)
+                forward_summary, forward_image_urls = await fetch_forward_content(adapter, parsed.forward_id)
+                log.debug(f"forward_id={parsed.forward_id}, summary={forward_summary is not None}, images={len(forward_image_urls)}")
 
-            # 下载图片
-            images = await download_message_images(parsed.image_urls) if parsed.has_images() else []
+            # 防止空消息发送给 LLM (合并转发获取失败时)
+            if not plain_text and not reply_context and not forward_summary and not parsed.has_images() and not forward_image_urls:
+                log.warning("Empty message content after processing, skipping LLM call")
+                if parsed.has_forward():
+                    await adapter.send_msg(event, "抱歉，暂时无法读取这条合并转发消息的内容~喵")
+                return
+
+            # 收集所有图片 URL (来自消息本身 + 来自合并转发)
+            all_image_urls = parsed.image_urls + forward_image_urls
+            
+            # 下载图片 (限制最多 5 张)
+            images = await download_message_images(all_image_urls, max_count=5) if all_image_urls else []
 
             # 构建 LLM 消息
             context_text = build_context_message(
