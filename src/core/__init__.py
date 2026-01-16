@@ -5,8 +5,10 @@
 - onebot: OneBot 消息段解析/构建
 - media: 媒体下载/编码
 - llm_message: LangChain 消息构建
+- exceptions: 自定义异常层次
+- resilience: 重试、熔断、退避策略
 """
 
-from src.core import onebot, media, llm_message
+from src.core import onebot, media, llm_message, exceptions, resilience
 
-__all__ = ["onebot", "media", "llm_message"]
+__all__ = ["onebot", "media", "llm_message", "exceptions", "resilience"]

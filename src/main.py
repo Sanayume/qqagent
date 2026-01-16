@@ -7,23 +7,31 @@ LangGraph QQ Agent - 主程序
 
 import asyncio
 import os
-import re
 
 from src.adapters.onebot import OneBotAdapter, OneBotEvent
 from src.adapters.mcp import MCPManager
 from src.agent.graph import QQAgent
-from src.agent.tools import DEFAULT_TOOLS
+from src.agent.tools import DEFAULT_TOOLS, set_send_message_callback
 from src.memory import MemoryStore
 from src.presets import PresetManager
 from src.utils.config import load_settings
 from src.utils.config_loader import get_config_loader
 from src.utils.env_loader import get_env_loader
-from src.utils.logger import setup_logger, log
+from src.utils.logger import setup_logger, log, log_error
 
 # 导入 core 模块
-from src.core.onebot import parse_segments, make_text_description, build_text_segment, build_image_segment
+from src.core.onebot import parse_segments, make_text_description
 from src.core.media import download_and_encode
-from src.core.llm_message import build_multimodal_message, build_context_message
+from src.core.llm_message import build_multimodal_message, build_rich_context_message
+from src.core.exceptions import (
+    NetworkError, APIError, RateLimitError, AuthError,
+    MediaError, DownloadError, OneBotError,
+)
+from src.core.resilience import CircuitOpenError
+from src.session.aggregator import (
+    MessageAggregator, PendingMessage,
+    format_aggregated_messages, collect_images_from_messages,
+)
 
 
 # 加载 .env 文件 (使用 EnvLoader 支持热重载)
@@ -46,6 +54,7 @@ async def fetch_reply_context(adapter: OneBotAdapter, reply_id: int) -> str | No
     try:
         result = await adapter.get_msg(reply_id)
         if result.get("status") != "ok":
+            log.debug(f"获取引用消息失败: {result.get('msg', 'unknown')}")
             return None
 
         data = result.get("data", {})
@@ -55,8 +64,15 @@ async def fetch_reply_context(adapter: OneBotAdapter, reply_id: int) -> str | No
         context = f"{sender}: {make_text_description(parsed)}"
         log.debug(f"Reply context: {context}")
         return context
+
+    except asyncio.TimeoutError:
+        log.warning("⏱️ 获取引用消息超时")
+        return None
+    except OneBotError as e:
+        log.warning(f"🤖 获取引用消息失败: {e}")
+        return None
     except Exception as e:
-        log.warning(f"Failed to get reply message: {e}")
+        log.warning(f"获取引用消息异常: {type(e).__name__}: {e}")
         return None
 
 
@@ -75,67 +91,63 @@ async def fetch_forward_content(adapter: OneBotAdapter, forward_id: str, max_nod
     try:
         result = await adapter.get_forward_msg(forward_id)
         log.debug(f"Forward API result status: {result.get('status')}, retcode: {result.get('retcode')}")
-        log.debug(f"Forward API raw data keys: {result.get('data', {}).keys() if result.get('data') else 'None'}")
-        log.debug(f"Forward API raw data: {str(result.get('data', {}))[:500]}")
-        
+
         if result.get("status") != "ok":
-            log.warning(f"Forward API failed: {result.get('msg', result.get('message', 'Unknown error'))}")
-            return None
+            log.warning(f"📦 获取转发消息失败: {result.get('msg', result.get('message', 'Unknown'))}")
+            return None, []
 
         data = result.get("data", {})
         # NapCat 可能返回 "messages" 而不是 "message"
         nodes = data.get("message", data.get("messages", []))
         log.debug(f"Forward message has {len(nodes)} nodes")
-        
+
         if not nodes:
-            log.warning("Forward message has no nodes")
+            log.warning("📦 转发消息为空")
             return None, []
-            
+
         summaries = []
         all_image_urls = []
 
         for i, node in enumerate(nodes[:max_nodes]):
             node_type = node.get("type", "unknown")
-            log.debug(f"Processing node {i}: type={node_type}, keys={node.keys()}")
-            
+
             # 尝试多种数据结构
-            # 结构1: {type: "node", data: {nickname, content}}
-            # 结构2: 直接 {nickname/user_id, content/message}
             if node_type == "node":
                 node_data = node.get("data", {})
             else:
-                # NapCat 可能直接返回数据，没有 type=node 包装
                 node_data = node
-            
+
             nickname = node_data.get("nickname", node_data.get("sender", {}).get("nickname", "某人"))
             content = node_data.get("content", node_data.get("message", ""))
-            
-            log.debug(f"Node {i} nickname={nickname}, content type={type(content).__name__}")
-            
+
             if isinstance(content, list):
                 node_parsed = parse_segments(content)
-                # 提取图片 URL
                 if node_parsed.image_urls:
                     all_image_urls.extend(node_parsed.image_urls)
-                    log.debug(f"Node {i} has {len(node_parsed.image_urls)} images")
                 content = make_text_description(node_parsed)
             elif isinstance(content, str):
                 content = content.strip()
             else:
                 content = str(content)[:200] if content else ""
-            
+
             if nickname or content:
                 summaries.append(f"{nickname}: {content[:200]}")
-                log.debug(f"Node {i}: {nickname}: {content[:50]}...")
 
         if len(nodes) > max_nodes:
             summaries.append(f"...还有 {len(nodes) - max_nodes} 条消息")
 
         summary = "\n".join(summaries)
-        log.info(f"Forward content ({len(nodes)} nodes, {len(all_image_urls)} images): {summary[:100]}..." if len(summary) > 100 else f"Forward content: {summary}")
+        log.info(f"📦 转发消息: {len(nodes)} 条, {len(all_image_urls)} 张图片")
         return summary, all_image_urls
+
+    except asyncio.TimeoutError:
+        log.warning("⏱️ 获取转发消息超时")
+        return None, []
+    except OneBotError as e:
+        log.warning(f"🤖 获取转发消息失败: {e}")
+        return None, []
     except Exception as e:
-        log.exception(f"Failed to get forward message: {e}")
+        log.warning(f"获取转发消息异常: {type(e).__name__}: {e}")
         return None, []
 
 
@@ -150,71 +162,30 @@ async def download_message_images(image_urls: list[str], max_count: int = 3) -> 
         图片列表 [(base64, mime_type), ...]
     """
     images = []
+    failed_count = 0
+
     for url in image_urls[:max_count]:
         try:
             b64, mime = await download_and_encode(url)
             images.append((b64, mime))
-            log.debug(f"Downloaded image: {mime}, {len(b64)} chars")
+            log.debug(f"🖼️ 下载图片成功: {mime}, {len(b64)} chars")
+        except asyncio.TimeoutError:
+            failed_count += 1
+            log.warning(f"⏱️ 下载图片超时: {url[:50]}...")
+        except DownloadError as e:
+            failed_count += 1
+            log.warning(f"⬇️ 下载图片失败: {e}")
+        except MediaError as e:
+            failed_count += 1
+            log.warning(f"🖼️ 图片处理失败: {e}")
         except Exception as e:
-            log.warning(f"Failed to download image {url}: {e}")
+            failed_count += 1
+            log.warning(f"下载图片异常: {type(e).__name__}: {e}")
+
+    if failed_count > 0:
+        log.info(f"🖼️ 图片下载: {len(images)} 成功, {failed_count} 失败")
+
     return images
-
-
-async def build_response_segments(
-    response_text: str,
-    tool_images: list[tuple[str, str]],
-) -> list[dict]:
-    """构建回复消息段
-
-    处理文本中的 markdown 图片链接，并附加工具返回的图片。
-
-    Args:
-        response_text: AI 回复文本
-        tool_images: 工具返回的图片列表 [(base64, mime_type), ...]
-
-    Returns:
-        OneBot 消息段列表
-    """
-    segments = []
-
-    # 处理文本中的 markdown 图片链接 ![...](url)
-    img_pattern = r'!\[([^\]]*)\]\(([^)]+)\)'
-    parts = re.split(img_pattern, response_text)
-
-    i = 0
-    while i < len(parts):
-        if i + 2 < len(parts):
-            # 图片匹配: (text_before, alt, url, ...)
-            text_before = parts[i]
-            if text_before.strip():
-                segments.append(build_text_segment(text_before))
-
-            # 跳过 alt text，获取 URL
-            img_url = parts[i + 2]
-
-            # 下载图片并转为 base64
-            try:
-                log.debug(f"Downloading response image: {img_url}")
-                img_b64, img_mime = await download_and_encode(img_url)
-                segments.append(build_image_segment(f"base64://{img_b64}"))
-                log.debug(f"Converted image to base64: {len(img_b64)} chars")
-            except Exception as e:
-                log.warning(f"Failed to download response image {img_url}: {e}")
-                segments.append(build_text_segment(f"[图片: {img_url}]"))
-
-            i += 3
-        else:
-            # 剩余文本
-            if parts[i].strip():
-                segments.append(build_text_segment(parts[i]))
-            i += 1
-
-    # 添加工具返回的图片
-    for img_b64, img_mime in tool_images:
-        segments.append(build_image_segment(f"base64://{img_b64}"))
-        log.debug(f"Added tool image: {img_mime}, {len(img_b64)} chars")
-
-    return segments
 
 
 # ==================== 主程序 ====================
@@ -244,7 +215,7 @@ async def main():
         log.info(f"LangSmith Project: {settings.langchain_project}")
 
     # 创建 MemoryStore (SQLite 持久化)
-    memory_store = MemoryStore(db_path="data/sessions.db", max_messages=20)
+    memory_store = MemoryStore(db_path="data/sessions.db", max_messages=settings.agent.max_history_messages)
     log.success(f"MemoryStore initialized: {memory_store.get_session_count()} existing sessions")
 
     # 创建 PresetManager
@@ -315,14 +286,155 @@ async def main():
     bot_names = settings.agent.bot_names
     allow_at = settings.agent.allow_at_reply
     allow_private = settings.agent.allow_private
-    
+    allow_all_group = settings.agent.allow_all_group_msg
+
     log.info(f"Bot names: {bot_names}")
-    log.info(f"Allow @: {allow_at}, Allow private: {allow_private}")
-    
-    # 消息处理器
+    log.info(f"Allow @: {allow_at}, Allow private: {allow_private}, Allow all group: {allow_all_group}")
+
+    # ==================== 核心处理函数 ====================
+
+    async def process_single_message(
+        event: OneBotEvent,
+        parsed,
+        plain_text: str,
+        sender: str,
+        reply_context: str | None,
+        forward_summary: str | None,
+        all_image_urls: list[str],
+    ):
+        """处理单条消息（私聊或未聚合的群消息）"""
+        session_id = adapter.session_manager.get_session_id(
+            user_id=event.user_id,
+            group_id=event.group_id if event.is_group else None,
+            is_private=event.is_private,
+        )
+
+        # 下载图片
+        images = await download_message_images(all_image_urls, max_count=5) if all_image_urls else []
+
+        # 构建 LLM 消息
+        context_text = build_rich_context_message(
+            main_text=plain_text,
+            sender_name=sender,
+            sender_qq=event.user_id,
+            message_id=event.message_id or 0,
+            group_id=event.group_id if event.is_group else None,
+            reply_to_id=parsed.reply_id,
+            reply_context=reply_context,
+            at_targets=parsed.at_targets if parsed.at_targets else None,
+            forward_summary=forward_summary,
+        )
+        llm_message = build_multimodal_message(text=context_text, images=images)
+
+        await invoke_agent(event, session_id, llm_message)
+
+    async def process_aggregated_messages(
+        group_id: int,
+        messages: list[PendingMessage],
+        first_event,
+    ):
+        """处理聚合后的群消息"""
+        if not messages or not first_event:
+            return
+
+        log.info(f"🔄 处理聚合消息: 群 {group_id}, {len(messages)} 条")
+
+        session_id = adapter.session_manager.get_session_id(
+            user_id=first_event.user_id,
+            group_id=group_id,
+            is_private=False,
+        )
+
+        # 收集所有图片
+        all_image_urls = collect_images_from_messages(messages)
+        images = await download_message_images(all_image_urls, max_count=5) if all_image_urls else []
+
+        # 格式化聚合消息
+        context_text = format_aggregated_messages(messages, group_id)
+        llm_message = build_multimodal_message(text=context_text, images=images)
+
+        await invoke_agent(first_event, session_id, llm_message)
+
+    async def invoke_agent(event: OneBotEvent, session_id: str, llm_message):
+        """调用 Agent 并处理响应"""
+        loop = asyncio.get_running_loop()
+
+        # 实时发送回调 - 工具调用时触发，提交到适配器发送
+        def realtime_callback(cmd: dict):
+            asyncio.run_coroutine_threadsafe(
+                adapter.send_rich_msg(
+                    event=event,
+                    text=cmd.get("text", ""),
+                    image=cmd.get("image", ""),
+                    at_users=cmd.get("at_users"),
+                    reply_to=cmd.get("reply_to", 0),
+                ),
+                loop,
+            )
+
+        set_send_message_callback(realtime_callback)
+
+        try:
+            await agent.chat(
+                message=llm_message,
+                session_id=session_id,
+                user_id=event.user_id,
+                group_id=event.group_id,
+                user_name=event.sender_nickname,
+            )
+            log.info("💭 Agent 处理完成")
+
+        except RateLimitError as e:
+            log_error(e, context="调用 LLM")
+            await adapter.send_rich_msg(event, text="🚦 请求太频繁了，请稍后再试~")
+
+        except AuthError as e:
+            log_error(e, context="调用 LLM")
+            await adapter.send_rich_msg(event, text="🔑 AI 服务认证失败，请联系管理员检查配置")
+
+        except CircuitOpenError as e:
+            log.warning(f"⚡ 熔断器开启: {e.name}")
+            await adapter.send_rich_msg(event, text="⚡ 服务暂时不可用，请稍后再试~")
+
+        except NetworkError as e:
+            log_error(e, context="处理消息")
+            await adapter.send_rich_msg(event, text="🌐 网络连接异常，请稍后重试~")
+
+        except APIError as e:
+            log_error(e, context="调用 API")
+            await adapter.send_rich_msg(event, text=f"📡 服务异常: {e.user_hint or '请稍后重试'}")
+
+        except OneBotError as e:
+            log_error(e, context="发送消息")
+
+        except asyncio.CancelledError:
+            log.info("消息处理被取消")
+            raise
+
+        except Exception as e:
+            log_error(e, context="处理消息", show_traceback=True)
+            # 根据 silent_errors 配置决定是否发送错误提示
+            if not settings.agent.silent_errors:
+                try:
+                    await adapter.send_rich_msg(event, text="❌ 处理消息时出错了，请稍后重试")
+                except Exception:
+                    pass
+
+        finally:
+            set_send_message_callback(None)
+
+    # 创建群消息聚合器
+    group_aggregator = MessageAggregator(
+        initial_wait=10.0,   # 首条消息后等待 10 秒
+        extended_wait=15.0,  # 有后续消息时最多等待 15 秒
+        on_aggregate=process_aggregated_messages,
+    )
+
+    # ==================== 消息处理器 ====================
+
     @adapter.on_message
     async def handle_message(event: OneBotEvent):
-        """处理收到的消息（支持多模态）"""
+        """处理收到的消息（支持多模态 + 群消息聚合）"""
         # 解析消息段
         segments = event.message if isinstance(event.message, list) else []
         parsed = parse_segments(segments)
@@ -343,8 +455,10 @@ async def main():
 
         if event.is_private and allow_private:
             should_respond = True
-        if event.is_group and allow_at and adapter.self_id:
-            if event.is_at_me(adapter.self_id):
+        if event.is_group:
+            if allow_all_group:
+                should_respond = True
+            elif allow_at and adapter.self_id and event.is_at_me(adapter.self_id):
                 should_respond = True
         for name in bot_names:
             if name.lower() in plain_text.lower():
@@ -354,18 +468,9 @@ async def main():
         if not should_respond:
             return
 
-        log.info(f"Responding to: {text_desc}")
-        log.debug(f"Raw segments: {segments}")
-        log.debug(f"Parsed image_urls: {parsed.image_urls}")
+        log.debug(f"📩 触发响应: {text_desc[:50]}")
 
         try:
-            # 生成会话 ID
-            session_id = adapter.session_manager.get_session_id(
-                user_id=event.user_id,
-                group_id=event.group_id if event.is_group else None,
-                is_private=event.is_private,
-            )
-
             # 获取上下文（引用消息、合并转发）
             reply_context = None
             forward_summary = None
@@ -376,60 +481,45 @@ async def main():
 
             if parsed.has_forward() and parsed.forward_id:
                 forward_summary, forward_image_urls = await fetch_forward_content(adapter, parsed.forward_id)
-                log.debug(f"forward_id={parsed.forward_id}, summary={forward_summary is not None}, images={len(forward_image_urls)}")
 
-            # 防止空消息发送给 LLM (合并转发获取失败时)
+            # 防止空消息
+            all_image_urls = parsed.image_urls + forward_image_urls
             if not plain_text and not reply_context and not forward_summary and not parsed.has_images() and not forward_image_urls:
-                log.warning("Empty message content after processing, skipping LLM call")
+                log.warning("空消息，跳过处理")
                 if parsed.has_forward():
-                    await adapter.send_msg(event, "抱歉，暂时无法读取这条合并转发消息的内容~喵")
+                    await adapter.send_msg(event, "抱歉，暂时无法读取这条合并转发消息的内容~")
                 return
 
-            # 收集所有图片 URL (来自消息本身 + 来自合并转发)
-            all_image_urls = parsed.image_urls + forward_image_urls
-            
-            # 下载图片 (限制最多 5 张)
-            images = await download_message_images(all_image_urls, max_count=5) if all_image_urls else []
-
-            # 构建 LLM 消息
-            context_text = build_context_message(
-                main_text=plain_text,
-                reply_context=reply_context,
-                forward_summary=forward_summary,
-            )
-            llm_message = build_multimodal_message(text=context_text, images=images)
-
-            # 调用 Agent
-            chat_response = await agent.chat(
-                message=llm_message,
-                session_id=session_id,
-                user_id=event.user_id,
-                group_id=event.group_id,
-                user_name=sender,
-            )
-
-            response_text = chat_response.text
-            tool_images = chat_response.images
-
-            log.info(f"Response: {response_text[:100]}..." if len(response_text) > 100 else f"Response: {response_text}")
-            if tool_images:
-                log.info(f"Tool returned {len(tool_images)} image(s)")
-
-            # 构建回复消息段
-            response_segments = await build_response_segments(response_text, tool_images)
-
-            # 发送回复
-            if not response_segments:
-                await adapter.send_msg(event, response_text)
-            elif len(response_segments) == 1 and response_segments[0]["type"] == "text":
-                await adapter.send_msg(event, response_text)
+            # ===== 分流：私聊直接处理，群聊走聚合器 =====
+            if event.is_private:
+                # 私聊：立即处理
+                await process_single_message(
+                    event=event,
+                    parsed=parsed,
+                    plain_text=plain_text,
+                    sender=sender,
+                    reply_context=reply_context,
+                    forward_summary=forward_summary,
+                    all_image_urls=all_image_urls,
+                )
             else:
-                await adapter.send_msg(event, response_segments)
+                # 群聊：添加到聚合器
+                pending = PendingMessage(
+                    sender_name=sender,
+                    sender_qq=event.user_id,
+                    message_id=event.message_id or 0,
+                    text=plain_text,
+                    image_urls=all_image_urls,
+                    reply_context=reply_context,
+                    reply_to_id=parsed.reply_id,
+                    at_targets=parsed.at_targets or [],
+                    forward_summary=forward_summary,
+                )
+                await group_aggregator.add_message(event.group_id, pending, event)
 
         except Exception as e:
-            log.exception(f"Error processing message: {e}")
-            await adapter.send_msg(event, f"抱歉，处理消息时出错了: {str(e)[:50]}")
-    
+            log_error(e, context="消息预处理", show_traceback=True)
+
     # 事件处理器
     @adapter.on_event
     async def handle_event(event: OneBotEvent):
@@ -452,6 +542,8 @@ async def main():
     except KeyboardInterrupt:
         log.info("Interrupted by user")
     finally:
+        # 刷新聚合器中的待处理消息
+        await group_aggregator.flush_all()
         await adapter.stop()
         await mcp_manager.stop()
         log.info("Bot stopped")

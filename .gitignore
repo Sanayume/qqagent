@@ -54,3 +54,7 @@ mcp_servers.json
 # Additional User Requested Ignores
 琪露诺.yaml
 tmpclaude*
+.env/
+gcli2api/
+gcli2api*
+debug*

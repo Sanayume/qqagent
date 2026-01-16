@@ -59,18 +59,16 @@ def dict_to_message(data: dict) -> BaseMessage:
     if msg_type == "HumanMessage":
         return HumanMessage(content=content)
     elif msg_type == "AIMessage":
-        msg = AIMessage(content=content)
-        if "tool_calls" in data:
-            msg.tool_calls = data["tool_calls"]
-        return msg
+        # 不恢复 tool_calls，避免 Gemini API 的 tool_call/response 数量不匹配错误
+        # 历史中的工具调用已执行完毕，保留它们只会导致格式兼容性问题
+        return AIMessage(content=content)
     elif msg_type == "SystemMessage":
         return SystemMessage(content=content)
     elif msg_type == "ToolMessage":
-        return ToolMessage(
-            content=content,
-            tool_call_id=data.get("tool_call_id", ""),
-            name=data.get("name", ""),
-        )
+        # 不恢复 ToolMessage，转为 AIMessage 纯文本
+        # 历史中的 ToolMessage 可能缺少匹配的 AIMessage(tool_calls)，导致 Gemini 验证失败
+        tool_name = data.get("name", "tool")
+        return AIMessage(content=f"[{tool_name}执行结果: {content[:200]}{'...' if len(content) > 200 else ''}]")
     else:
         # 默认当作 HumanMessage
         return HumanMessage(content=content)

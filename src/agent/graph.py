@@ -5,6 +5,7 @@ LangGraph Agent 图定义
 支持思考模型 (Thinking Models) 如 Gemini 2.5 Pro, Claude 3.5 with thinking 等。
 """
 
+import time
 from typing import Literal
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, ToolMessage, BaseMessage
 from langchain_openai import ChatOpenAI
@@ -13,32 +14,24 @@ from langgraph.prebuilt import ToolNode
 
 from src.agent.state import AgentState, ChatResponse
 from src.agent.tools import DEFAULT_TOOLS
-from src.core.llm_message import extract_tool_images
+from src.core.llm_message import extract_tool_images, extract_send_commands
 from src.utils.logger import log
 
 
 def sanitize_messages_for_api(messages: list[BaseMessage]) -> list[BaseMessage]:
-    """清理消息列表，使其兼容不支持完整 tool calling 历史的 API
+    """清理消息列表，使其兼容 Gemini API 的 tool calling 格式要求
 
-    某些 API 代理不支持 OpenAI 的 ToolMessage 格式。
-    此函数将历史中的工具调用转换为纯文本，但保留当前轮次的工具调用。
-
-    策略:
-    - 找到最后一个 HumanMessage，之后的内容是"当前轮次"
-    - 当前轮次的 AIMessage(tool_calls) 和 ToolMessage 保持不变（工具循环需要）
-    - 历史轮次的 AIMessage(tool_calls) -> 转为纯文本 AIMessage
-    - 历史轮次的 ToolMessage -> 合并到前一个 AIMessage 或转为 AIMessage
+    只清理历史消息中的 tool_calls/ToolMessage，当前轮次保持原样以维持 agent 循环。
     """
     if not messages:
         return messages
 
-    # 找到最后一个 HumanMessage 的位置
+    # 找到最后一个 HumanMessage 的位置（当前轮次开始）
     last_human_idx = -1
     for i, msg in enumerate(messages):
         if isinstance(msg, HumanMessage):
             last_human_idx = i
 
-    # 如果没有 HumanMessage，不处理
     if last_human_idx == -1:
         return messages
 
@@ -46,72 +39,31 @@ def sanitize_messages_for_api(messages: list[BaseMessage]) -> list[BaseMessage]:
     history = messages[:last_human_idx]
     current_round = messages[last_human_idx:]
 
-    # 检查历史中是否有需要清理的消息
-    has_tool_messages = any(isinstance(m, ToolMessage) for m in history)
-    has_tool_calls = any(
-        isinstance(m, AIMessage) and hasattr(m, 'tool_calls') and m.tool_calls
-        for m in history
-    )
-
-    if not has_tool_messages and not has_tool_calls:
-        # 历史中没有工具相关消息，直接返回
-        return messages
-
-    log.debug(f"Sanitizing {len(history)} history messages (has_tool_messages={has_tool_messages}, has_tool_calls={has_tool_calls})")
-
-    # 清理历史消息
+    # ==================== 只清理历史消息 ====================
     sanitized_history = []
-    pending_tool_results = []  # 暂存 ToolMessage 内容
-
+    
     for msg in history:
         if isinstance(msg, ToolMessage):
-            # 收集工具结果
-            tool_name = getattr(msg, 'name', None) or msg.tool_call_id or 'tool'
+            # ToolMessage 转为 AIMessage 纯文本
+            tool_name = getattr(msg, 'name', None) or 'tool'
             content = msg.content if isinstance(msg.content, str) else str(msg.content)
-            # 截断过长的内容
             if len(content) > 200:
                 content = content[:200] + "..."
-            pending_tool_results.append(f"[{tool_name}结果: {content}]")
+            sanitized_history.append(AIMessage(content=f"[{tool_name}结果: {content}]"))
 
         elif isinstance(msg, AIMessage):
-            # 处理 AIMessage
             if hasattr(msg, 'tool_calls') and msg.tool_calls:
-                # 有工具调用的 AIMessage，转为纯文本
+                # AIMessage with tool_calls 转为纯文本
                 tool_names = [tc.get('name', 'unknown') for tc in msg.tool_calls]
-                text_content = msg.content or ""
-
-                # 添加之前的工具结果
-                if pending_tool_results:
-                    text_content = (text_content + " " if text_content else "") + " ".join(pending_tool_results)
-                    pending_tool_results = []
-
-                # 如果没有任何文本内容，添加工具调用描述
-                if not text_content.strip():
-                    text_content = f"[调用了工具: {', '.join(tool_names)}]"
-
+                text_content = msg.content or f"[调用了工具: {', '.join(tool_names)}]"
                 sanitized_history.append(AIMessage(content=text_content))
             else:
-                # 普通 AIMessage
-                # 先添加之前的工具结果
-                if pending_tool_results:
-                    sanitized_history.append(AIMessage(content=" ".join(pending_tool_results)))
-                    pending_tool_results = []
                 sanitized_history.append(msg)
         else:
-            # 其他消息类型（HumanMessage, SystemMessage）
-            # 先添加之前的工具结果
-            if pending_tool_results:
-                sanitized_history.append(AIMessage(content=" ".join(pending_tool_results)))
-                pending_tool_results = []
             sanitized_history.append(msg)
 
-    # 处理剩余的工具结果
-    if pending_tool_results:
-        sanitized_history.append(AIMessage(content=" ".join(pending_tool_results)))
-
-    log.debug(f"Sanitized history: {len(history)} -> {len(sanitized_history)} messages")
-
-    return sanitized_history + current_round
+    # 当前轮次保持原样（包括 tool_calls 和 ToolMessage）
+    return sanitized_history + list(current_round)
 
 
 def create_llm(
@@ -121,25 +73,30 @@ def create_llm(
     temperature: float = 0.7,
 ) -> ChatOpenAI:
     """创建 LLM 实例
-    
+
     Args:
         model: 模型名称
         api_key: API Key
         base_url: API Base URL (用于本地模型/代理)
         temperature: 温度参数
     """
+    import httpx
+
     kwargs = {
         "model": model,
         "temperature": temperature,
+        # 禁用系统代理，避免本地 API 请求被代理拦截
+        "http_client": httpx.Client(trust_env=False),
+        "http_async_client": httpx.AsyncClient(trust_env=False),
     }
-    
+
     if api_key:
         kwargs["api_key"] = api_key
     if base_url:
         kwargs["base_url"] = base_url
-    
+
     log.info(f"Creating LLM: model={model}, base_url={base_url or 'default'}")
-    
+
     return ChatOpenAI(**kwargs)
 
 
@@ -219,35 +176,41 @@ def create_agent_graph(
     base_url: str = "",
 ):
     """创建 Agent 图
-    
+
     Args:
         llm: 预配置的 LLM 实例 (可选)
         tools: 工具列表 (默认使用内置工具)
         model: 模型名称 (当 llm 为 None 时使用)
         api_key: API Key (当 llm 为 None 时使用)
         base_url: API Base URL (当 llm 为 None 时使用)
-    
+
     Returns:
         编译后的 LangGraph Agent
     """
     # 创建 LLM
     if llm is None:
         llm = create_llm(model=model, api_key=api_key, base_url=base_url)
-    
+
     # 使用默认工具或自定义工具
     if tools is None:
         tools = DEFAULT_TOOLS
-    
-    # 绑定工具到 LLM (禁用并行工具调用，兼容某些代理)
-    llm_with_tools = llm.bind_tools(tools, parallel_tool_calls=False)
-    
+
+    # 绑定工具到 LLM
+    llm_with_tools = llm.bind_tools(tools)
+
     # 创建工具节点
     tool_node = ToolNode(tools)
-    
+
+    # 循环计数器（用于日志）
+    loop_counter = {"count": 0, "start_time": 0}
+
     # ==================== 节点函数 ====================
 
     def call_model(state: AgentState) -> dict:
         """调用 LLM 生成回复"""
+        loop_counter["count"] += 1
+        loop_num = loop_counter["count"]
+
         messages = list(state["messages"])
 
         # 如果有系统提示词，确保它在最前面
@@ -257,48 +220,91 @@ def create_agent_graph(
             if not messages or not isinstance(messages[0], SystemMessage):
                 messages.insert(0, SystemMessage(content=system_prompt))
 
-        # 清理历史消息，兼容不支持 ToolMessage 格式的 API
+        # 清理消息格式，修复 Gemini API 的 tool_calls/ToolMessage 匹配要求
         messages = sanitize_messages_for_api(messages)
 
-        log.debug(f"Calling LLM with {len(messages)} messages")
+        # 日志：显示循环状态
+        log.info(f"🤖 Agent 循环 #{loop_num} | 📨 调用 LLM ({len(messages)} 条消息)")
 
         # 调用 LLM
+        start_time = time.time()
         response = llm_with_tools.invoke(messages)
-        
+        elapsed = time.time() - start_time
+
         # 提取内容用于日志
         content_preview = extract_response_content(response)
-        if content_preview:
-            log.debug(f"LLM response: {content_preview[:100]}...")
+
+        # 检查是否有工具调用
+        has_tool_calls = hasattr(response, "tool_calls") and response.tool_calls
+
+        if has_tool_calls:
+            tool_names = [tc.get('name', '?') for tc in response.tool_calls]
+            log.info(f"🤖 Agent 循环 #{loop_num} | ⚡ LLM 决定调用工具: {', '.join(tool_names)} ({elapsed:.2f}s)")
+        elif content_preview:
+            preview = content_preview[:80].replace('\n', ' ')
+            log.info(f"🤖 Agent 循环 #{loop_num} | 💬 LLM 回复: {preview}{'...' if len(content_preview) > 80 else ''} ({elapsed:.2f}s)")
         else:
-            log.debug("LLM response: [tool call or empty]")
-        
+            log.info(f"🤖 Agent 循环 #{loop_num} | 💬 LLM 回复: [空] ({elapsed:.2f}s)")
+
         return {"messages": [response]}
-    
+
+    def execute_tools(state: AgentState) -> dict:
+        """执行工具并记录日志"""
+        messages = state["messages"]
+        last_message = messages[-1]
+        loop_num = loop_counter["count"]
+
+        if hasattr(last_message, "tool_calls") and last_message.tool_calls:
+            for tc in last_message.tool_calls:
+                tool_name = tc.get('name', '?')
+                tool_args = tc.get('args', {})
+                # 简化参数显示
+                args_preview = str(tool_args)[:100]
+                log.info(f"🔧 工具执行 | {tool_name}({args_preview}{'...' if len(str(tool_args)) > 100 else ''})")
+
+        # 调用原始工具节点
+        start_time = time.time()
+        result = tool_node.invoke(state)
+        elapsed = time.time() - start_time
+
+        # 记录工具结果
+        if "messages" in result:
+            for msg in result["messages"]:
+                if isinstance(msg, ToolMessage):
+                    tool_name = getattr(msg, 'name', '?')
+                    content = msg.content if isinstance(msg.content, str) else str(msg.content)
+                    preview = content[:80].replace('\n', ' ')
+                    log.info(f"🔧 工具结果 | {tool_name}: {preview}{'...' if len(content) > 80 else ''} ({elapsed:.2f}s)")
+
+        return result
+
     def should_continue(state: AgentState) -> Literal["tools", "end"]:
         """决定是否继续调用工具"""
         messages = state["messages"]
         last_message = messages[-1]
-        
+        loop_num = loop_counter["count"]
+
         # 如果最后一条消息有工具调用，继续执行工具
         if hasattr(last_message, "tool_calls") and last_message.tool_calls:
-            log.debug(f"Tool calls detected: {[tc['name'] for tc in last_message.tool_calls]}")
             return "tools"
-        
-        # 否则结束
+
+        # 结束循环
+        total_time = time.time() - loop_counter["start_time"]
+        log.info(f"🤖 Agent 完成 | 共 {loop_num} 轮循环, 耗时 {total_time:.2f}s")
         return "end"
-    
+
     # ==================== 构建图 ====================
-    
+
     # 创建状态图
     graph = StateGraph(AgentState)
-    
+
     # 添加节点
     graph.add_node("agent", call_model)
-    graph.add_node("tools", tool_node)
-    
+    graph.add_node("tools", execute_tools)  # 使用自定义的工具执行函数
+
     # 设置入口点
     graph.set_entry_point("agent")
-    
+
     # 添加条件边
     graph.add_conditional_edges(
         "agent",
@@ -308,15 +314,20 @@ def create_agent_graph(
             "end": END,
         }
     )
-    
+
     # 工具执行后返回 agent
     graph.add_edge("tools", "agent")
-    
-    # 编译图
+
+    # 编译图，设置递归限制防止无限循环
+    # recursion_limit 限制图的最大步数（每个节点执行算一步）
+    # 设为 20 意味着大约 10 轮 agent-tools 循环
     compiled = graph.compile()
-    
+
+    # 保存循环计数器到编译后的图
+    compiled._loop_counter = loop_counter
+
     log.info(f"Agent graph created with {len(tools)} tools: {[t.name for t in tools]}")
-    
+
     return compiled
 
 
@@ -429,17 +440,36 @@ class QQAgent:
         Returns:
             ChatResponse 对象，包含文本回复和图片列表
         """
+        # 重置循环计数器
+        if hasattr(self.graph, '_loop_counter'):
+            self.graph._loop_counter["count"] = 0
+            self.graph._loop_counter["start_time"] = time.time()
+
+        # 日志：开始处理
+        log.info(f"{'─' * 50}")
+        log.info(f"🚀 Agent 开始 | model={self.model} | session={session_id[:20]}")
+
         # 获取会话历史
         history = self._get_history(session_id)
+        log.info(f"📚 历史消息: {len(history)} 条")
 
         # 处理消息：支持字符串或 HumanMessage
         if isinstance(message, str):
             user_message = HumanMessage(content=message)
+            msg_preview = message[:50]
         elif isinstance(message, HumanMessage):
             user_message = message
+            # 提取预览
+            if isinstance(message.content, str):
+                msg_preview = message.content[:50]
+            else:
+                msg_preview = "[多模态消息]"
         else:
             # 其他类型，尝试转换
             user_message = HumanMessage(content=str(message))
+            msg_preview = str(message)[:50]
+
+        log.info(f"📝 用户输入: {msg_preview}{'...' if len(msg_preview) >= 50 else ''}")
 
         # 添加用户消息
         history.append(user_message)
@@ -456,8 +486,9 @@ class QQAgent:
             "should_respond": True,
         }
 
-        # 运行 Agent
-        result = await self.graph.ainvoke(state)
+        # 运行 Agent，设置递归限制防止无限循环
+        # recursion_limit 限制图的最大步数，设为 15 约等于 7 轮工具调用
+        result = await self.graph.ainvoke(state, {"recursion_limit": 15})
 
         # 获取最后的 AI 回复
         ai_message = result["messages"][-1]
@@ -468,11 +499,16 @@ class QQAgent:
         # 提取工具返回的图片
         tool_images = extract_tool_images(result["messages"])
 
+        # 提取 send_message 工具的发送指令
+        pending_sends = extract_send_commands(result["messages"])
+
         # 更新会话历史 (存储时将多模态消息转为纯文本描述)
         final_messages = list(result["messages"])
         self._set_history(session_id, final_messages)
 
-        return ChatResponse(text=response_text, images=tool_images)
+        log.info(f"{'─' * 50}")
+
+        return ChatResponse(text=response_text, images=tool_images, pending_sends=pending_sends)
 
     def clear_session(self, session_id: str):
         """清除会话历史"""

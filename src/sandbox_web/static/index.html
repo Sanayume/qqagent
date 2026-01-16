@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>QQ Agent 沙盒</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div class="container">
+        <!-- 侧边栏 -->
+        <aside class="sidebar">
+            <div class="sidebar-header">
+                <h2>QQ 沙盒</h2>
+            </div>
+
+            <!-- 预设选择 -->
+            <div class="current-user">
+                <div class="section-title">预设</div>
+                <select id="presetSelect" class="user-select" onchange="switchPreset()">
+                    <!-- 动态填充 -->
+                </select>
+            </div>
+
+            <!-- 当前身份 -->
+            <div class="current-user">
+                <div class="section-title">发送身份</div>
+                <select id="currentUser" class="user-select">
+                    <!-- 动态填充 -->
+                </select>
+            </div>
+
+            <!-- 聊天列表 -->
+            <div class="chat-list">
+                <div class="section-title">群聊</div>
+                <div id="groupList" class="list">
+                    <!-- 动态填充 -->
+                </div>
+
+                <div class="section-title">私聊</div>
+                <div id="privateList" class="list">
+                    <!-- 动态填充 -->
+                </div>
+            </div>
+
+            <!-- 管理按钮 -->
+            <div class="sidebar-footer">
+                <button onclick="showModal('userModal')" class="btn">+ 用户</button>
+                <button onclick="showModal('groupModal')" class="btn">+ 群</button>
+            </div>
+            <div class="sidebar-footer">
+                <button onclick="clearMessages()" class="btn btn-warning">清空消息</button>
+                <button onclick="resetAll()" class="btn btn-danger">完全重置</button>
+            </div>
+        </aside>
+
+        <!-- 主聊天区域 -->
+        <main class="chat-area">
+            <div class="chat-header">
+                <span id="chatTitle">选择一个聊天</span>
+                <span id="chatInfo" class="chat-info"></span>
+            </div>
+
+            <div id="messages" class="messages">
+                <!-- 消息列表 -->
+            </div>
+
+            <div class="input-area">
+                <div class="input-toolbar">
+                    <button onclick="toggleAtPicker()" class="tool-btn" title="@某人">@</button>
+                    <button onclick="toggleReply()" class="tool-btn" id="replyBtn" title="回复">回复</button>
+                    <input type="file" id="imageInput" accept="image/*" style="display:none" onchange="handleImageSelect(event)">
+                    <button onclick="document.getElementById('imageInput').click()" class="tool-btn" title="图片">图</button>
+                </div>
+                <div id="replyPreview" class="reply-preview" style="display:none">
+                    <span id="replyText"></span>
+                    <button onclick="cancelReply()" class="cancel-btn">×</button>
+                </div>
+                <div id="atPreview" class="at-preview" style="display:none">
+                    <span id="atText"></span>
+                    <button onclick="cancelAt()" class="cancel-btn">×</button>
+                </div>
+                <div class="input-row">
+                    <textarea id="messageInput" placeholder="输入消息..." rows="1" onkeydown="handleKeyDown(event)"></textarea>
+                    <button onclick="sendMessage()" class="send-btn">发送</button>
+                </div>
+            </div>
+        </main>
+
+        <!-- 用户管理面板 -->
+        <aside class="management-panel">
+            <div class="panel-section">
+                <div class="section-title">用户管理</div>
+                <div id="userManagement" class="user-list">
+                    <!-- 动态填充 -->
+                </div>
+            </div>
+
+            <div class="panel-section">
+                <div class="section-title">群成员</div>
+                <div id="groupMembers" class="member-list">
+                    <!-- 动态填充 -->
+                </div>
+            </div>
+        </aside>
+    </div>
+
+    <!-- 创建用户弹窗 -->
+    <div id="userModal" class="modal">
+        <div class="modal-content">
+            <h3>创建用户</h3>
+            <input type="number" id="newUserQQ" placeholder="QQ号">
+            <input type="text" id="newUserNickname" placeholder="昵称">
+            <div class="modal-buttons">
+                <button onclick="createUser()">创建</button>
+                <button onclick="hideModal('userModal')">取消</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 创建群弹窗 -->
+    <div id="groupModal" class="modal">
+        <div class="modal-content">
+            <h3>创建群</h3>
+            <input type="number" id="newGroupId" placeholder="群号">
+            <input type="text" id="newGroupName" placeholder="群名称">
+            <div class="modal-buttons">
+                <button onclick="createGroup()">创建</button>
+                <button onclick="hideModal('groupModal')">取消</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- @ 选择弹窗 -->
+    <div id="atModal" class="modal">
+        <div class="modal-content">
+            <h3>选择要 @ 的人</h3>
+            <div id="atUserList" class="at-user-list">
+                <!-- 动态填充 -->
+            </div>
+            <div class="modal-buttons">
+                <button onclick="hideModal('atModal')">完成</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>

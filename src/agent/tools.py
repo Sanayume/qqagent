@@ -5,9 +5,36 @@
 """
 
 import ast
+import contextvars
 import operator
 from datetime import datetime
+from typing import Callable
 from langchain_core.tools import tool
+
+
+# ==================== 实时消息回调 ====================
+
+# 使用 ContextVar 实现线程/协程安全的回调隔离
+# 每个 invoke_agent 调用设置自己的回调，不会互相覆盖
+_send_message_callback_var: contextvars.ContextVar[Callable[[dict], None] | None] = \
+    contextvars.ContextVar("send_message_callback", default=None)
+
+
+def set_send_message_callback(callback: Callable[[dict], None] | None):
+    """设置当前上下文的 send_message 回调函数
+
+    使用 ContextVar 实现隔离，不同协程/会话的回调互不影响。
+
+    Args:
+        callback: 回调函数，接收消息指令 dict，立即处理发送
+                  设为 None 则禁用实时发送
+    """
+    _send_message_callback_var.set(callback)
+
+
+def get_send_message_callback() -> Callable[[dict], None] | None:
+    """获取当前上下文的回调函数"""
+    return _send_message_callback_var.get()
 
 
 # ==================== 安全数学表达式求值 ====================
@@ -94,6 +121,83 @@ def safe_eval(expr: str) -> float:
 
 
 @tool
+def send_message(
+    text: str = "",
+    image: str = "",
+    at_users: str = "",
+    reply_to: int = 0,
+) -> str:
+    """发送消息到当前对话。这是你与用户交流的唯一方式。
+
+    你的普通文字输出不会被任何人看到，只有调用此工具才能真正发送消息。
+    你可以选择不调用（保持沉默），也可以调用一次或多次。
+
+    【关键行为规则】
+    1. 调用一次 send_message 就会发送一条消息，无需确认或重试
+    2. 发送成功后，直接结束本轮对话，不要再调用任何工具
+    3. 如果要发送多条消息，在一轮对话中连续调用多次，每次内容不同
+    4. 绝对不要用相同或相似的内容重复调用此工具
+
+    Args:
+        text: 文本内容
+        image: 图片 URL（可选）
+        at_users: 要 @的用户 QQ 号，多个用逗号分隔，如 "123,456"（可选）
+        reply_to: 要回复的消息 ID（可选）
+
+    组合示例:
+        - 纯文本: text="你好"
+        - 纯图片: image="http://example.com/img.jpg"
+        - 文本+图片: text="看这个", image="http://..."
+        - @某人+文本: at_users="123456", text="你觉得呢"
+        - 回复消息: reply_to=12345, text="同意"
+
+    Returns:
+        发送状态确认（看到确认后请结束对话，不要继续调用工具）
+    """
+    import json
+
+    # 解析 at_users
+    at_list = []
+    if at_users:
+        for qq in at_users.split(","):
+            qq = qq.strip()
+            if qq.isdigit():
+                at_list.append(int(qq))
+
+    # 构建发送指令
+    command = {
+        "_type": "send_message_command",
+        "text": text,
+        "image": image,
+        "at_users": at_list,
+        "reply_to": reply_to,
+    }
+
+    # 如果设置了实时回调，立即发送消息
+    callback = get_send_message_callback()
+    if callback is not None:
+        try:
+            callback(command)
+        except Exception:
+            # 回调失败不影响工具返回
+            pass
+
+    # 返回确认信息，明确告知消息已发送，LLM 应停止
+    parts = []
+    if text:
+        parts.append(f"文本: {text[:50]}{'...' if len(text) > 50 else ''}")
+    if image:
+        parts.append(f"图片: {image[:30]}...")
+    if at_list:
+        parts.append(f"@: {at_list}")
+    if reply_to:
+        parts.append(f"回复: {reply_to}")
+
+    # 返回消息明确告知 LLM 任务完成，应该停止
+    return f"✓ 消息发送成功！({', '.join(parts) or '空消息'}) 【任务完成，请结束对话】"
+
+
+@tool
 def get_current_time() -> str:
     """获取当前时间。返回格式化的日期时间字符串。"""
     now = datetime.now()
@@ -138,6 +242,7 @@ def calculate(expression: str) -> str:
 
 # 默认工具列表
 DEFAULT_TOOLS = [
+    send_message,
     get_current_time,
     get_current_date,
     calculate,

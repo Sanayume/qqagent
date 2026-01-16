@@ -28,7 +28,11 @@ class OneBotConfig(BaseSettings):
 class LLMConfig(BaseSettings):
     """LLM provider settings"""
     
-    model_config = SettingsConfigDict(extra="ignore")
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
     
     # OpenAI
     openai_api_key: str = Field(default="", alias="OPENAI_API_KEY")
@@ -53,6 +57,7 @@ class AgentConfig(BaseSettings):
     # Trigger settings
     allow_at_reply: bool = Field(default=True, description="是否响应@")
     allow_private: bool = Field(default=True, description="是否响应私聊")
+    allow_all_group_msg: bool = Field(default=False, description="是否响应所有群消息(不需要@)")
     random_reply_freq: float = Field(default=0.0, description="随机回复概率")
     msg_cooldown: int = Field(default=3, description="冷却时间(秒)")
     
@@ -64,6 +69,12 @@ class AgentConfig(BaseSettings):
     # Preset
     default_preset: str = Field(default="default", description="默认预设")
     preset_dir: Path = Field(default=Path("config/presets"), description="预设目录")
+    
+    # Error handling
+    silent_errors: bool = Field(default=False, description="遇到未处理错误时是否静默（不发送错误提示）")
+    
+    # History
+    max_history_messages: int = Field(default=70, description="每个会话保留的最大历史消息数")
 
 
 class Settings(BaseSettings):

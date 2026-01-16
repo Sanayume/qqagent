@@ -313,7 +313,7 @@ def build_context_message(
     reply_context: str | None = None,
     forward_summary: str | None = None,
 ) -> str:
-    """构建包含上下文的文本
+    """构建包含上下文的文本（旧版，保持兼容）
 
     Args:
         main_text: 主要文本内容
@@ -334,6 +334,78 @@ def build_context_message(
     parts.append(main_text)
 
     return "\n".join(parts)
+
+
+def build_rich_context_message(
+    main_text: str,
+    sender_name: str = "",
+    sender_qq: int = 0,
+    message_id: int = 0,
+    group_id: int | None = None,
+    reply_to_id: int | None = None,
+    reply_context: str | None = None,
+    at_targets: list[str] | None = None,
+    forward_summary: str | None = None,
+) -> str:
+    """构建包含完整上下文的消息文本
+
+    让 LLM 知道：谁发的、消息ID、引用了什么、@了谁
+
+    Args:
+        main_text: 主要文本内容
+        sender_name: 发送者昵称
+        sender_qq: 发送者 QQ 号
+        message_id: 当前消息 ID
+        group_id: 群号（私聊为 None）
+        reply_to_id: 引用的消息 ID
+        reply_context: 引用消息的内容描述
+        at_targets: @ 的目标 QQ 号列表
+        forward_summary: 合并转发的摘要
+
+    Returns:
+        格式化的完整消息文本
+    """
+    parts = []
+
+    # 消息上下文部分
+    context_lines = []
+
+    if sender_name or sender_qq:
+        if sender_name and sender_qq:
+            context_lines.append(f"发送者: {sender_name} (QQ: {sender_qq})")
+        elif sender_qq:
+            context_lines.append(f"发送者 QQ: {sender_qq}")
+        else:
+            context_lines.append(f"发送者: {sender_name}")
+
+    if message_id:
+        context_lines.append(f"消息ID: {message_id}")
+
+    if group_id:
+        context_lines.append(f"群号: {group_id}")
+
+    if reply_to_id and reply_context:
+        context_lines.append(f"引用: 消息ID {reply_to_id}，内容为「{reply_context}」")
+    elif reply_context:
+        context_lines.append(f"引用: {reply_context}")
+
+    if at_targets:
+        context_lines.append(f"@了: {', '.join(at_targets)}")
+
+    if context_lines:
+        parts.append("[消息上下文]\n" + "\n".join(context_lines))
+
+    # 合并转发
+    if forward_summary:
+        parts.append(f"[合并转发]\n{forward_summary}")
+
+    # 消息正文
+    if main_text:
+        parts.append(f"[消息内容]\n{main_text}")
+    else:
+        parts.append("[消息内容]\n（无文字）")
+
+    return "\n\n".join(parts)
 
 
 # ==================== 工具消息处理 ====================
@@ -417,3 +489,47 @@ def _detect_image_mime_from_base64(base64_data: str) -> str:
         return "image/webp"
     else:
         return "image/png"  # 默认
+
+
+def extract_send_commands(messages: list[BaseMessage]) -> list[dict]:
+    """从消息列表中提取 send_message 工具的发送指令
+
+    遍历所有 ToolMessage，提取 __CMD__: 标记后的 JSON 指令。
+
+    Args:
+        messages: LangChain 消息列表
+
+    Returns:
+        发送指令列表，每个指令包含 text, image, at_users, reply_to
+
+    Example:
+        >>> commands = extract_send_commands(messages)
+        >>> for cmd in commands:
+        ...     print(cmd["text"], cmd["image"])
+    """
+    import json
+
+    CMD_PREFIX = "__CMD__:"
+
+    commands = []
+    for msg in messages:
+        if not isinstance(msg, ToolMessage):
+            continue
+
+        content = msg.content
+        if not isinstance(content, str):
+            continue
+
+        # 查找 __CMD__: 标记
+        if CMD_PREFIX in content:
+            try:
+                # 提取 __CMD__: 之后的 JSON
+                cmd_start = content.index(CMD_PREFIX) + len(CMD_PREFIX)
+                json_str = content[cmd_start:].strip()
+                data = json.loads(json_str)
+                if isinstance(data, dict) and data.get("_type") == "send_message_command":
+                    commands.append(data)
+            except (json.JSONDecodeError, ValueError, TypeError):
+                pass
+
+    return commands

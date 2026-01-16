@@ -1,11 +1,12 @@
 """
-媒体处理工具 - 下载、编码、MIME 检测
+媒体处理工具 - 下载、编码、MIME 检测、GIF 预处理
 
 本模块提供纯函数，用于：
 - 下载网络图片
 - Base64 编码/解码
 - MIME 类型检测
 - Data URL 生成
+- GIF 帧提取（兼容不支持 GIF 的 LLM）
 
 注意：
 - 本模块不知道 OneBot 协议
@@ -14,10 +15,13 @@
 """
 
 import base64
+import io
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     import httpx
+
+from src.utils.logger import log
 
 # MIME 类型魔数映射
 MIME_SIGNATURES: dict[bytes, str] = {
@@ -190,6 +194,93 @@ def parse_data_url(data_url: str) -> tuple[bytes, str]:
 # ==================== 异步下载函数 ====================
 
 
+def extract_gif_frame(
+    data: bytes,
+    frame_index: int = 2,
+    output_format: str = "PNG",
+) -> tuple[bytes, str]:
+    """从 GIF 中提取指定帧，转换为静态图片
+
+    很多 LLM 不支持 GIF 格式，使用此函数提取某一帧作为静态图片。
+
+    Args:
+        data: GIF 图片的二进制数据
+        frame_index: 要提取的帧索引（从 0 开始，默认第 3 帧即 index=2）
+        output_format: 输出格式，默认 PNG
+
+    Returns:
+        (图片二进制数据, MIME 类型) 元组
+
+    Note:
+        - 如果帧数不足，会取最后一帧
+        - 如果 Pillow 未安装，原样返回 GIF 数据
+    """
+    try:
+        from PIL import Image
+
+        # 打开 GIF
+        img = Image.open(io.BytesIO(data))
+
+        # 获取总帧数
+        n_frames = getattr(img, 'n_frames', 1)
+
+        # 调整帧索引（不超过总帧数）
+        actual_index = min(frame_index, n_frames - 1)
+
+        # 跳转到指定帧
+        if n_frames > 1:
+            img.seek(actual_index)
+
+        # 转换为 RGBA（处理透明度）再转为 RGB
+        if img.mode in ('RGBA', 'P'):
+            # 创建白色背景
+            background = Image.new('RGB', img.size, (255, 255, 255))
+            if img.mode == 'P':
+                img = img.convert('RGBA')
+            background.paste(img, mask=img.split()[-1] if img.mode == 'RGBA' else None)
+            img = background
+        elif img.mode != 'RGB':
+            img = img.convert('RGB')
+
+        # 输出到字节流
+        output = io.BytesIO()
+        img.save(output, format=output_format)
+        output_data = output.getvalue()
+
+        mime_type = f"image/{output_format.lower()}"
+        log.debug(f"🎞️ GIF 预处理: 提取第 {actual_index + 1}/{n_frames} 帧 → {output_format}")
+
+        return output_data, mime_type
+
+    except ImportError:
+        log.warning("Pillow 未安装，无法预处理 GIF")
+        return data, "image/gif"
+    except Exception as e:
+        log.warning(f"GIF 预处理失败: {e}，使用原图")
+        return data, "image/gif"
+
+
+def preprocess_image(data: bytes) -> tuple[bytes, str]:
+    """预处理图片，确保 LLM 兼容
+
+    目前的预处理：
+    - GIF → 提取第 3 帧转为 PNG
+
+    Args:
+        data: 图片二进制数据
+
+    Returns:
+        (处理后的数据, MIME 类型) 元组
+    """
+    mime_type = detect_mime_type(data)
+
+    # GIF 预处理
+    if mime_type == "image/gif":
+        return extract_gif_frame(data, frame_index=2)
+
+    return data, mime_type
+
+
 async def download_image(
     url: str,
     client: "httpx.AsyncClient | None" = None,
@@ -231,6 +322,7 @@ async def download_and_encode(
     url: str,
     client: "httpx.AsyncClient | None" = None,
     timeout: float = 30.0,
+    preprocess: bool = True,
 ) -> tuple[str, str]:
     """下载图片并编码为 base64
 
@@ -238,6 +330,7 @@ async def download_and_encode(
         url: 图片 URL
         client: httpx 异步客户端
         timeout: 下载超时时间（秒）
+        preprocess: 是否进行预处理（GIF 转 PNG 等）
 
     Returns:
         (base64_data, mime_type) 元组
@@ -251,7 +344,13 @@ async def download_and_encode(
         'image/png'
     """
     data = await download_image(url, client, timeout)
-    mime_type = detect_mime_type(data)
+
+    # 预处理（GIF → PNG 等）
+    if preprocess:
+        data, mime_type = preprocess_image(data)
+    else:
+        mime_type = detect_mime_type(data)
+
     b64 = encode_base64(data)
     return b64, mime_type
 

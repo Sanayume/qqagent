@@ -8,10 +8,17 @@ OneBot 11 Adapter - 支持正向和反向 WebSocket
 反向 WebSocket (Reverse):
     - Agent 作为服务端，等待 NapCat 连接
     - 更稳定，NapCat 会自动重连
+
+特性:
+    - 指数退避重连
+    - 按目标隔离的发送限速
+    - 细化异常处理
 """
 
 import asyncio
 import json
+import random
+import time
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable, Coroutine
@@ -21,7 +28,13 @@ from websockets.server import serve as ws_serve
 from websockets.client import connect as ws_connect
 from websockets.exceptions import ConnectionClosed
 
-from src.utils.logger import log
+from src.utils.logger import log, log_connection_status
+from src.core.resilience import BackoffStrategy
+from src.core.exceptions import (
+    OneBotError, OneBotConnectionError, OneBotAPIError,
+    TimeoutError as AgentTimeoutError,
+)
+from src.core.media import download_and_encode
 
 
 @dataclass
@@ -118,15 +131,41 @@ class OneBotEvent:
 MessageHandler = Callable[[OneBotEvent], Coroutine[Any, Any, None]]
 
 
+class TargetRateLimiter:
+    """单个目标的发送限速器（简单实现）"""
+
+    def __init__(self, delay_min: float, delay_max: float):
+        self.delay_min = delay_min
+        self.delay_max = delay_max
+        self.last_send_time: float = 0
+        self.lock = asyncio.Lock()
+
+    async def acquire(self, target_key: str):
+        """获取发送许可（必要时等待）"""
+        async with self.lock:
+            elapsed = time.time() - self.last_send_time
+            if self.last_send_time > 0 and elapsed < self.delay_min:
+                delay = random.uniform(self.delay_min, self.delay_max)
+                wait_time = delay - elapsed
+                if wait_time > 0:
+                    log.info(f"⏳ [{target_key}] 发送延迟 {wait_time:.1f}s")
+                    await asyncio.sleep(wait_time)
+            self.last_send_time = time.time()
+
+
 class OneBotAdapter:
     """
     OneBot 11 适配器
-    
+
     支持两种连接模式:
     - forward: 正向WS，Agent主动连接NapCat
     - reverse: 反向WS，Agent作为服务端等待NapCat连接
+
+    特性:
+    - 按目标（群/用户）隔离的发送限速
+    - 不同目标并发，同一目标串行延迟
     """
-    
+
     def __init__(
         self,
         # Forward WS config
@@ -139,6 +178,9 @@ class OneBotAdapter:
         token: str = "",
         # Mode
         mode: str = "reverse",  # forward, reverse, both
+        # 防封延迟配置
+        send_delay_min: float = 3.0,
+        send_delay_max: float = 7.0,
     ):
         self.ws_url = ws_url
         self.reverse_host = reverse_host
@@ -146,24 +188,39 @@ class OneBotAdapter:
         self.reverse_path = reverse_path
         self.token = token
         self.mode = mode
-        
+
         # Connection state
         self._ws_forward: websockets.WebSocketClientProtocol | None = None
         self._ws_reverse: websockets.WebSocketServerProtocol | None = None
         self._server: websockets.Server | None = None
-        
+
         # Event handlers
         self._message_handlers: list[MessageHandler] = []
         self._event_handlers: list[Callable[[OneBotEvent], Coroutine]] = []
-        
+
         # API response tracking
         self._pending_requests: dict[str, asyncio.Future] = {}
-        
+
         # Bot info
         self.self_id: int | None = None
-        
+
         # Running flag
         self._running = False
+
+        # 按目标隔离的限速器
+        self._rate_limiters: dict[str, TargetRateLimiter] = {}
+        self._limiters_lock = asyncio.Lock()
+        self._send_delay_min = send_delay_min
+        self._send_delay_max = send_delay_max
+
+    async def _get_limiter(self, target_key: str) -> TargetRateLimiter:
+        """获取目标的限速器"""
+        async with self._limiters_lock:
+            if target_key not in self._rate_limiters:
+                self._rate_limiters[target_key] = TargetRateLimiter(
+                    self._send_delay_min, self._send_delay_max
+                )
+            return self._rate_limiters[target_key]
     
     def on_message(self, handler: MessageHandler) -> MessageHandler:
         """注册消息处理器 (装饰器)"""
@@ -176,70 +233,99 @@ class OneBotAdapter:
         return handler
     
     # ==================== Connection Management ====================
-    
+
     async def start(self):
         """启动适配器"""
         self._running = True
         log.info(f"Starting OneBot adapter in {self.mode} mode...")
-        
+
         tasks = []
-        
+
         if self.mode in ("forward", "both"):
             tasks.append(asyncio.create_task(self._run_forward_client()))
-        
+
         if self.mode in ("reverse", "both"):
             tasks.append(asyncio.create_task(self._run_reverse_server()))
-        
+
         if not tasks:
             log.error(f"Invalid mode: {self.mode}")
             return
-        
+
         try:
             await asyncio.gather(*tasks)
         except asyncio.CancelledError:
             log.info("Adapter shutting down...")
         finally:
             await self.stop()
-    
+
     async def stop(self):
         """停止适配器"""
         self._running = False
-        
+
         if self._ws_forward:
             await self._ws_forward.close()
-        
+
         if self._ws_reverse:
             await self._ws_reverse.close()
-        
+
         if self._server:
             self._server.close()
             await self._server.wait_closed()
-        
+
         log.info("OneBot adapter stopped")
     
     async def _run_forward_client(self):
-        """运行正向 WebSocket 客户端"""
+        """运行正向 WebSocket 客户端 (带指数退避重连)"""
         headers = {}
         if self.token:
             headers["Authorization"] = f"Bearer {self.token}"
-        
+
+        backoff = BackoffStrategy(base_delay=1.0, max_delay=60.0)
+        attempt = 0
+        max_attempts = 0  # 0 = 无限重试
+
         while self._running:
             try:
-                log.info(f"Connecting to NapCat at {self.ws_url}...")
+                log_connection_status("connecting", f"NapCat ({self.ws_url})")
                 async with ws_connect(self.ws_url, extra_headers=headers) as ws:
                     self._ws_forward = ws
-                    log.success(f"Connected to NapCat (Forward WS)")
+                    attempt = 0  # 连接成功，重置计数
+                    log_connection_status("connected", f"NapCat (Forward WS)")
                     await self._handle_connection(ws, "forward")
-                    
-            except ConnectionRefusedError:
-                log.warning(f"Connection refused, retrying in 5s...")
+
+            except ConnectionRefusedError as e:
+                attempt += 1
+                delay = backoff.get_delay(attempt - 1)
+                log_connection_status(
+                    "reconnecting", f"NapCat ({self.ws_url})",
+                    attempt=attempt, max_attempts=max_attempts,
+                    delay=delay, error=e
+                )
             except ConnectionClosed as e:
-                log.warning(f"Connection closed: {e}, reconnecting in 5s...")
+                attempt += 1
+                delay = backoff.get_delay(attempt - 1)
+                log_connection_status(
+                    "disconnected", "NapCat (Forward WS)",
+                    error=e
+                )
+                log_connection_status(
+                    "reconnecting", f"NapCat ({self.ws_url})",
+                    attempt=attempt, delay=delay
+                )
+            except asyncio.CancelledError:
+                log.info("Forward WS client cancelled")
+                break
             except Exception as e:
-                log.error(f"Forward WS error: {e}, retrying in 5s...")
-            
+                attempt += 1
+                delay = backoff.get_delay(attempt - 1)
+                log_connection_status(
+                    "reconnecting", f"NapCat ({self.ws_url})",
+                    attempt=attempt, delay=delay, error=e
+                )
+
             if self._running:
-                await asyncio.sleep(5)
+                delay = backoff.get_delay(max(0, attempt - 1))
+                await asyncio.sleep(delay)
     
     async def _run_reverse_server(self):
         """运行反向 WebSocket 服务端"""
@@ -392,25 +478,86 @@ class OneBotAdapter:
             raise TimeoutError(f"API call timed out: {action}")
     
     async def send_private_msg(self, user_id: int, message: str | list) -> dict:
-        """发送私聊消息"""
+        """发送私聊消息（带限速）"""
+        target_key = f"private_{user_id}"
+        limiter = await self._get_limiter(target_key)
+        await limiter.acquire(target_key)
         return await self.call_api("send_private_msg", {
             "user_id": user_id,
             "message": message,
         })
-    
+
     async def send_group_msg(self, group_id: int, message: str | list) -> dict:
-        """发送群消息"""
+        """发送群消息（带限速）"""
+        target_key = f"group_{group_id}"
+        limiter = await self._get_limiter(target_key)
+        await limiter.acquire(target_key)
         return await self.call_api("send_group_msg", {
             "group_id": group_id,
             "message": message,
         })
-    
+
     async def send_msg(self, event: OneBotEvent, message: str | list) -> dict:
-        """根据事件类型发送消息"""
+        """根据事件类型发送消息（带限速）"""
         if event.is_group:
             return await self.send_group_msg(event.group_id, message)
         else:
             return await self.send_private_msg(event.user_id, message)
+
+    async def send_rich_msg(
+        self,
+        event: OneBotEvent,
+        text: str = "",
+        image: str = "",
+        at_users: list[int] | None = None,
+        reply_to: int = 0,
+    ) -> dict:
+        """发送富文本消息（自动构建消息段 + 限速）
+
+        这是发送消息的高级接口，封装了消息段构建、图片下载、限速等逻辑。
+
+        Args:
+            event: 原始事件（用于确定发送目标）
+            text: 文本内容
+            image: 图片 URL（会自动下载转 base64）
+            at_users: 要 @ 的用户 QQ 号列表
+            reply_to: 要回复的消息 ID
+
+        Returns:
+            API 响应
+        """
+        segments = []
+
+        # 1. 回复（必须在最前面）
+        if reply_to:
+            segments.append(reply(reply_to))
+
+        # 2. @ 用户
+        if at_users:
+            for qq in at_users[:5]:  # 最多 @ 5 人
+                segments.append(at(qq))
+
+        # 3. 文本
+        if text:
+            # 如果前面有 @，加个空格分隔
+            if at_users:
+                text = " " + text
+            segments.append({"type": "text", "data": {"text": text}})
+
+        # 4. 图片
+        if image:
+            try:
+                img_b64, _ = await download_and_encode(image)
+                segments.append({"type": "image", "data": {"file": f"base64://{img_b64}"}})
+            except Exception as e:
+                log.warning(f"下载图片失败: {e}")
+                segments.append({"type": "text", "data": {"text": "[图片加载失败]"}})
+
+        if not segments:
+            log.warning("send_rich_msg: 空消息，跳过")
+            return {"status": "ok", "data": None}
+
+        return await self.send_msg(event, segments)
     
     async def get_login_info(self) -> dict:
         """获取登录信息"""

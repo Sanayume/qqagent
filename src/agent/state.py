@@ -15,15 +15,21 @@ class ChatResponse:
     """Agent 聊天响应
 
     Attributes:
-        text: 文本回复内容
+        text: 文本回复内容（Agent 内部输出，不直接发送）
         images: 图片列表 [(base64_data, mime_type), ...]
+        pending_sends: 待执行的发送指令列表
     """
     text: str = ""
     images: list[tuple[str, str]] = field(default_factory=list)
+    pending_sends: list[dict] = field(default_factory=list)
 
     def has_images(self) -> bool:
         """是否包含图片"""
         return bool(self.images)
+
+    def has_pending_sends(self) -> bool:
+        """是否有待发送的消息"""
+        return bool(self.pending_sends)
 
 
 class AgentState(TypedDict):
