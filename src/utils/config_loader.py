@@ -25,6 +25,16 @@ class DynamicConfig:
         "all_groups_per_user": False
     })
     
+    # 消息聚合器配置
+    aggregator: Dict[str, Any] = field(default_factory=lambda: {
+        "initial_wait": 10.0,
+        "extended_wait": 15.0,
+        "density_enabled": False,
+        "density_threshold": 10,
+        "density_window": 60.0,
+        "density_cooldown": 60.0,
+    })
+    
     # 提示词预设
     presets: Dict[str, Any] = field(default_factory=dict)
     
@@ -71,6 +81,7 @@ class ConfigLoader:
             
             # 更新配置对象
             self.config.session = data.get("session", self.config.session)
+            self.config.aggregator = data.get("aggregator", self.config.aggregator)
             self.config.presets = data.get("presets", self.config.presets)
             self.config.plugins = data.get("plugins", self.config.plugins)
             

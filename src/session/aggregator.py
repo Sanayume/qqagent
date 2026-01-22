@@ -103,14 +103,28 @@ class MessageAggregator:
         initial_wait: float = 5.0,
         extended_wait: float = 10.0,
         on_aggregate: Callable[[int, list[PendingMessage], Any], Coroutine[Any, Any, None]] | None = None,
+        # 密度控制参数
+        density_enabled: bool = False,    # 是否启用密度控制（默认关闭）
+        density_threshold: int = 10,      # 触发密度控制的消息数阈值
+        density_window: float = 60.0,     # 密度检测时间窗口（秒）
+        density_cooldown: float = 60.0,   # 密度过高时的冷却等待时间（秒）
     ):
         self.initial_wait = initial_wait
         self.extended_wait = extended_wait
         self.on_aggregate = on_aggregate
+        
+        # 密度控制
+        self.density_enabled = density_enabled
+        self.density_threshold = density_threshold
+        self.density_window = density_window
+        self.density_cooldown = density_cooldown
 
         # group_id -> AggregationBucket
         self._buckets: dict[int, AggregationBucket] = {}
         self._lock = asyncio.Lock()
+        
+        # 密度追踪: group_id -> [消息时间戳列表]
+        self._density_tracker: dict[int, list[float]] = {}
 
     async def add_message(
         self,
@@ -150,6 +164,21 @@ class MessageAggregator:
             # 添加消息
             bucket.messages.append(message)
             bucket.last_message_time = now
+            
+            # 更新密度追踪（仅在启用时）
+            is_high_density = False
+            if self.density_enabled:
+                if group_id not in self._density_tracker:
+                    self._density_tracker[group_id] = []
+                self._density_tracker[group_id].append(now)
+                # 清理过期的时间戳
+                self._density_tracker[group_id] = [
+                    t for t in self._density_tracker[group_id] 
+                    if now - t < self.density_window
+                ]
+                # 检测密度是否过高
+                current_density = len(self._density_tracker[group_id])
+                is_high_density = current_density >= self.density_threshold
 
             # 计算等待时间
             elapsed = now - bucket.first_message_time
@@ -161,6 +190,11 @@ class MessageAggregator:
                 remaining = self.extended_wait - elapsed
                 wait_time = max(0.5, remaining)  # 至少等 0.5s
                 log.debug(f"📥 群 {group_id}: 追加消息，剩余等待 {wait_time:.1f}s")
+            
+            # 如果密度过高，使用冷却等待时间
+            if is_high_density:
+                wait_time = max(wait_time, self.density_cooldown)
+                log.info(f"🔥 群 {group_id}: 消息密度过高 ({current_density}/{self.density_window:.0f}s)，冷却等待 {wait_time:.0f}s")
 
             # 取消旧定时器
             if bucket.timer_task and not bucket.timer_task.done():

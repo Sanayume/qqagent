@@ -423,12 +423,18 @@ async def main():
         finally:
             set_send_message_callback(None)
 
-    # 创建群消息聚合器
+    # 创建群消息聚合器（从配置文件读取参数）
+    agg_cfg = config_loader.config.aggregator
     group_aggregator = MessageAggregator(
-        initial_wait=10.0,   # 首条消息后等待 10 秒
-        extended_wait=15.0,  # 有后续消息时最多等待 15 秒
+        initial_wait=agg_cfg.get("initial_wait", 10.0),
+        extended_wait=agg_cfg.get("extended_wait", 15.0),
         on_aggregate=process_aggregated_messages,
+        density_enabled=agg_cfg.get("density_enabled", False),
+        density_threshold=agg_cfg.get("density_threshold", 10),
+        density_window=agg_cfg.get("density_window", 60.0),
+        density_cooldown=agg_cfg.get("density_cooldown", 60.0),
     )
+    log.info(f"Aggregator: density_enabled={agg_cfg.get('density_enabled', False)}, threshold={agg_cfg.get('density_threshold', 10)}")
 
     # ==================== 消息处理器 ====================
 

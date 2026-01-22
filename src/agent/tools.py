@@ -8,7 +8,7 @@ import ast
 import contextvars
 import operator
 from datetime import datetime
-from typing import Callable
+from typing import Any, Callable
 from langchain_core.tools import tool
 
 
@@ -124,7 +124,7 @@ def safe_eval(expr: str) -> float:
 def send_message(
     text: str = "",
     image: str = "",
-    at_users: str = "",
+    at_users: Any = "",
     reply_to: int = 0,
 ) -> str:
     """发送消息到当前对话。这是你与用户交流的唯一方式。
@@ -156,13 +156,25 @@ def send_message(
     """
     import json
 
-    # 解析 at_users
+    # 解析 at_users - 兼容多种输入格式
     at_list = []
     if at_users:
-        for qq in at_users.split(","):
-            qq = qq.strip()
-            if qq.isdigit():
-                at_list.append(int(qq))
+        # 如果是整数，直接添加
+        if isinstance(at_users, int):
+            at_list.append(at_users)
+        # 如果是列表，遍历添加
+        elif isinstance(at_users, list):
+            for item in at_users:
+                if isinstance(item, int):
+                    at_list.append(item)
+                elif isinstance(item, str) and item.strip().isdigit():
+                    at_list.append(int(item.strip()))
+        # 如果是字符串，按逗号分隔
+        elif isinstance(at_users, str):
+            for qq in at_users.split(","):
+                qq = qq.strip()
+                if qq.isdigit():
+                    at_list.append(int(qq))
 
     # 构建发送指令
     command = {
