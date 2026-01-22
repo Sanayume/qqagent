@@ -58,3 +58,5 @@ tmpclaude*
 gcli2api/
 gcli2api*
 debug*
+install_log.txt
+read_log.py
