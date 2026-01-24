@@ -1,0 +1,167 @@
+@import "tailwindcss";
+@import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=Noto+Sans+SC:wght@400;500;700;900&family=JetBrains+Mono:wght@400;500&display=swap');
+
+@theme {
+  /* =========================================
+     Theme: Kiovotos (Blue Archive Style)
+     Mode: Light / Clean / Tech
+     ========================================= */
+
+  /* Primary Palette */
+  --color-kivotos-bg: #f3f5f9;
+  /* Main Background (Light Grey-Blue) */
+  --color-kivotos-card: #ffffff;
+  /* Card Background (Pure White) */
+  --color-kivotos-navy: #1d2331;
+  /* Primary Text / Dark Accents */
+  --color-kivotos-cyan: #00d1ea;
+  /* Primary Highlight (Halo Blue) */
+  --color-kivotos-blue: #135174;
+  /* Secondary Accent */
+  --color-kivotos-pink: #fa9cbb;
+  /* Accent (Sensei Pink) */
+  --color-kivotos-yellow: #f9d923;
+  /* Warning / Star */
+  --color-kivotos-gray: #8b9bb4;
+  /* Secondary Text */
+
+  /* Fonts */
+  --font-family-display: 'Outfit', 'Noto Sans SC', sans-serif;
+  --font-family-mono: 'JetBrains Mono', monospace;
+
+  /* Animations */
+  --animate-float: float 6s ease-in-out infinite;
+  --animate-slide-in: slide-in 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+  --animate-pop: pop 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+
+  @keyframes float {
+
+    0%,
+    100% {
+      transform: translateY(0);
+    }
+
+    50% {
+      transform: translateY(-6px);
+    }
+  }
+
+  @keyframes slide-in {
+    from {
+      opacity: 0;
+      transform: translateX(-20px);
+    }
+
+    to {
+      opacity: 1;
+      transform: translateX(0);
+    }
+  }
+
+  @keyframes pop {
+    0% {
+      transform: scale(0.9);
+      opacity: 0;
+    }
+
+    100% {
+      transform: scale(1);
+      opacity: 1;
+    }
+  }
+}
+
+/* =========================================
+   Global Utilities & Reset
+   ========================================= */
+
+:root {
+  font-family: var(--font-family-display);
+  color-scheme: light;
+  /* Force Light Mode */
+  --bg-app: var(--color-kivotos-bg);
+  --text-main: var(--color-kivotos-navy);
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background-color: var(--bg-app);
+  color: var(--text-main);
+  overflow-x: hidden;
+
+  /* Diagonal Stripe Pattern (Kivotos Aesthetic) */
+  background-image: repeating-linear-gradient(45deg,
+      rgba(19, 81, 116, 0.03) 0px,
+      rgba(19, 81, 116, 0.03) 1px,
+      transparent 1px,
+      transparent 10px);
+}
+
+/* Custom Scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-kivotos-cyan);
+}
+
+/* Skewed UI Elements */
+.skew-box {
+  transform: skewX(-15deg);
+}
+
+.skew-box-content {
+  transform: skewX(15deg);
+}
+
+/* Tech Border (Corner Brackets) */
+.tech-border {
+  position: relative;
+  background: white;
+  border: 1px solid #e2e8f0;
+}
+
+.tech-border::before {
+  content: '';
+  position: absolute;
+  top: -1px;
+  left: -1px;
+  width: 8px;
+  height: 8px;
+  border-top: 2px solid var(--color-kivotos-cyan);
+  border-left: 2px solid var(--color-kivotos-cyan);
+}
+
+.tech-border::after {
+  content: '';
+  position: absolute;
+  bottom: -1px;
+  right: -1px;
+  width: 8px;
+  height: 8px;
+  border-bottom: 2px solid var(--color-kivotos-cyan);
+  border-right: 2px solid var(--color-kivotos-cyan);
+}
+
+/* Halo Effect */
+.halo-glow {
+  box-shadow: 0 0 15px rgba(0, 209, 234, 0.3);
+}
+
+/* Selection */
+::selection {
+  background: var(--color-kivotos-cyan);
+  color: white;
+}
