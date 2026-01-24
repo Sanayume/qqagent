@@ -7,8 +7,9 @@
 - llm_message: LangChain 消息构建
 - exceptions: 自定义异常层次
 - resilience: 重试、熔断、退避策略
+- context: 应用程序上下文单例
 """
 
-from src.core import onebot, media, llm_message, exceptions, resilience
+from src.core import onebot, media, llm_message, exceptions, resilience, context
 
-__all__ = ["onebot", "media", "llm_message", "exceptions", "resilience"]
+__all__ = ["onebot", "media", "llm_message", "exceptions", "resilience", "context"]

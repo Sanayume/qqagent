@@ -13,7 +13,6 @@ from langgraph.graph import StateGraph, END
 from langgraph.prebuilt import ToolNode
 
 from src.agent.state import AgentState, ChatResponse
-from src.agent.tools import DEFAULT_TOOLS
 from src.core.llm_message import extract_tool_images, extract_send_commands
 from src.utils.logger import log
 
@@ -191,9 +190,9 @@ def create_agent_graph(
     if llm is None:
         llm = create_llm(model=model, api_key=api_key, base_url=base_url)
 
-    # 使用默认工具或自定义工具
+    # 使用传入的工具或空列表（调用方应提供工具）
     if tools is None:
-        tools = DEFAULT_TOOLS
+        tools = []
 
     # 绑定工具到 LLM
     llm_with_tools = llm.bind_tools(tools)
@@ -361,7 +360,7 @@ class QQAgent:
         self.api_key = api_key
         self.base_url = base_url
         self.default_system_prompt = default_system_prompt
-        self._tools = tools or DEFAULT_TOOLS
+        self._tools = tools or []
 
         log.info(f"Initializing QQAgent with model: {model}")
 
