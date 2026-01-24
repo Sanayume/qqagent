@@ -56,6 +56,16 @@ class MCPManager:
         self._server_status: dict[str, MCPServerStatus] = {}
         self._tool_source: dict[str, str] = {}  # tool_name -> server_name
 
+    @property
+    def config_file(self) -> Path:
+        """获取配置文件路径"""
+        return self.config_path
+
+    @config_file.setter
+    def config_file(self, value: str | Path):
+        """设置配置文件路径"""
+        self.config_path = Path(value)
+
     def _load_config(self) -> dict[str, Any]:
         """加载配置文件"""
         if not self.config_path.exists():
@@ -347,9 +357,48 @@ class MCPManager:
         config = self._load_config()
         return list(config.get("mcpServers", {}).keys())
 
-    def get_server_status(self) -> dict[str, MCPServerStatus]:
-        """获取所有服务器的状态"""
-        return self._server_status.copy()
+    def get_server_status(self, name: str | None = None) -> dict[str, MCPServerStatus] | str:
+        """获取服务器状态
+
+        Args:
+            name: 服务器名称。如果为 None，返回所有服务器状态
+
+        Returns:
+            如果指定 name，返回状态字符串；否则返回所有状态字典
+        """
+        if name is None:
+            return self._server_status.copy()
+
+        if name in self._server_status:
+            return self._server_status[name].status
+        return "unknown"
+
+    @property
+    def servers(self) -> dict[str, MCPServerStatus]:
+        """获取所有服务器状态"""
+        return self._server_status
+
+    def get_tools_by_server(self, server_name: str) -> list:
+        """获取指定服务器的工具列表"""
+        result = []
+        for tool in self._tools:
+            tool_name = getattr(tool, "name", None)
+            if tool_name and self._tool_source.get(tool_name) == server_name:
+                result.append(tool)
+        return result
+
+    async def restart_server(self, name: str) -> bool:
+        """重启单个 MCP 服务器
+
+        Note: 当前实现会重启所有服务器，因为 MultiServerMCPClient
+        不支持单独重启某个服务器。
+        """
+        if name not in self._server_status:
+            return False
+
+        # 目前只能全部重启
+        await self.stop()
+        return await self.start()
 
     def get_tool_source(self, tool_name: str) -> str:
         """获取工具的来源服务器"""

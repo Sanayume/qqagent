@@ -11,7 +11,8 @@ import os
 from src.adapters.onebot import OneBotAdapter, OneBotEvent
 from src.adapters.mcp import MCPManager
 from src.agent.graph import QQAgent
-from src.agent.tools import DEFAULT_TOOLS, set_send_message_callback
+from src.agent.tools import set_send_message_callback
+from src.agent.tool_registry import init_builtin_tools, get_tool_registry
 from src.memory import MemoryStore
 from src.presets import PresetManager
 from src.utils.config import load_settings
@@ -32,6 +33,7 @@ from src.session.aggregator import (
     MessageAggregator, PendingMessage,
     format_aggregated_messages, collect_images_from_messages,
 )
+from src.core.context import get_app_context
 
 
 # 加载 .env 文件 (使用 EnvLoader 支持热重载)
@@ -232,11 +234,21 @@ async def main():
     # 启动 MCP 服务器并获取工具 (超时 120 秒，重试 2 次)
     mcp_manager = MCPManager("config/mcp_servers.json", timeout=120.0, retry_count=2)
     await mcp_manager.start()
-    mcp_tools = mcp_manager.get_tools()
 
-    # 合并内置工具和 MCP 工具
-    all_tools = DEFAULT_TOOLS + mcp_tools
-    log.info(f"Total tools: {len(all_tools)} (builtin: {len(DEFAULT_TOOLS)}, MCP: {len(mcp_tools)})")
+    # 初始化内置工具注册表
+    init_builtin_tools()
+    registry = get_tool_registry()
+
+    # 注册 MCP 工具到 Registry
+    for server_name, status in mcp_manager.servers.items():
+        if status.status == "success":
+            server_tools = mcp_manager.get_tools_by_server(server_name)
+            registry.register_mcp_tools(server_name, server_tools)
+
+    # 获取所有启用的工具
+    all_tools = registry.get_enabled_tools()
+    status = registry.get_status()
+    log.info(f"Total tools: {status['total']} (enabled: {status['enabled']}, disabled: {status['disabled']})")
 
     # 创建 Agent
     agent = QQAgent(
@@ -382,7 +394,10 @@ async def main():
                 group_id=event.group_id,
                 user_name=event.sender_nickname,
             )
-            log.info("💭 Agent 处理完成")
+            log.info("Agent 处理完成")
+
+            # 记录统计
+            ctx.stats.record_message()
 
         except RateLimitError as e:
             log_error(e, context="调用 LLM")
@@ -413,6 +428,7 @@ async def main():
 
         except Exception as e:
             log_error(e, context="处理消息", show_traceback=True)
+            ctx.stats.record_error()
             # 根据 silent_errors 配置决定是否发送错误提示
             if not settings.agent.silent_errors:
                 try:
@@ -435,6 +451,16 @@ async def main():
         density_cooldown=agg_cfg.get("density_cooldown", 60.0),
     )
     log.info(f"Aggregator: density_enabled={agg_cfg.get('density_enabled', False)}, threshold={agg_cfg.get('density_threshold', 10)}")
+
+    # ==================== 注册组件到 AppContext ====================
+    ctx = get_app_context()
+    ctx.register_agent(agent)
+    ctx.register_mcp_manager(mcp_manager)
+    ctx.register_adapter(adapter)
+    ctx.register_memory_store(memory_store)
+    ctx.register_aggregator(group_aggregator)
+    ctx.register_preset_manager(preset_manager)
+    log.success("All components registered to AppContext")
 
     # ==================== 消息处理器 ====================
 
@@ -536,10 +562,15 @@ async def main():
             elif event.meta_event_type == "heartbeat":
                 log.debug("Heartbeat")
     
+    # 启动 Admin Console (后台服务)
+    from src.admin.startup import start_admin_server, stop_admin_server
+    await start_admin_server(port=8088)
+    
     # 启动
     log.info("=" * 60)
     log.info("Bot is running! Waiting for messages...")
     log.info(f"Triggers: @bot, or mention: {bot_names}")
+    log.info("Admin Console: http://localhost:8088")
     log.info("Press Ctrl+C to stop")
     log.info("=" * 60)
     
@@ -552,6 +583,7 @@ async def main():
         await group_aggregator.flush_all()
         await adapter.stop()
         await mcp_manager.stop()
+        await stop_admin_server()
         log.info("Bot stopped")
 
 
