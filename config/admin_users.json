@@ -1,0 +1,9 @@
+{
+  "users": {
+    "admin": {
+      "hashed_password": "$2b$12$UVxIT6RTeqMr3XwPaAGemuYaUq0sj48ZVqi7kGnoDsSQQ2C3MAo1a",
+      "display_name": "管理员",
+      "is_active": true
+    }
+  }
+}

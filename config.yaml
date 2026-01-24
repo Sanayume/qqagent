@@ -8,7 +8,7 @@ aggregator:
   initial_wait: 15.0        # 首条消息后等待时间（秒）
   extended_wait: 5.0       # 有后续消息时的最大等待时间（秒）
   density_enabled: true     # 是否启用密度控制
-  density_threshold: 10     # 触发冷却的消息数阈值
+  density_threshold: 5     # 触发冷却的消息数阈值
   density_window: 60.0      # 密度检测时间窗口（秒）
   density_cooldown: 60.0    # 密度过高时的冷却等待时间（秒）
 

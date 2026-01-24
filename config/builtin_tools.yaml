@@ -1,0 +1,13 @@
+# 内置工具配置
+# 控制哪些工具启用/禁用
+# 核心工具 (is_core=true) 不在此处配置，始终启用
+
+tools:
+  # 实用工具 - 可自由启用/禁用
+  get_current_time: true
+  get_current_date: true
+  calculate: true
+
+  # 以后添加的工具示例：
+  # forward_message: true
+  # merge_forward: true
