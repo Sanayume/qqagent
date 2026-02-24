@@ -8,10 +8,12 @@
 
 - **🤖 ReAct Agent 架构**：基于 LangGraph 的思考→行动→观察循环，支持深度多轮推理。
 - **🌐 现代化管理后台**：内置基于 FastAPI + Vue 的 Admin Console，支持在线配置、工具管理、沙盒调试及日志监控。
-- **🖼️ 多模态深度支持**：完美处理图片、表情、引用回复、合并转发，能“看懂”复杂的上下文。
-- **🔧 MCP 工具生态**：原生支持 Model Context Protocol，可一键接入数千个外部工具及私有 API。
+- **🖼️ 多模态深度支持**：完美处理图片、表情、引用回复、合并转发，能"看懂"复杂的上下文。
+- **🔧 MCP 工具生态**：原生支持 Model Context Protocol，可一键接入搜索、图片生成等外部工具。
 - **🛡️ 工业级稳定性**：内置断路器 (Circuit Breaker)、指数退避重试 (Exponential Backoff) 及完善的错误隔离。
 - **📊 智能消息聚合**：针对高频群聊设计的智能聚合器，自动合并连续发言，大幅削减 Token 消耗。
+- **⏰ 定时发送**：`send_message` 支持 `delay_minutes` 参数，Agent 可安排延迟发送，工具立即返回不阻塞。
+- **📄 文件处理**：自动下载并读取群友发送的文件（PDF、Office、代码等），支持文本渲染为图片。
 - **🔄 配置全热重载**：无需重启，实时修改角色预设、工具开关及核心配置。
 
 ---
@@ -176,21 +178,51 @@ qqagent/
 
 ---
 
-## 🔧 MCP 工具配置
+## 🔧 内置工具
 
-在 `config/mcp_servers.json` 中配置：
+| 工具 | 类别 | 说明 |
+|------|------|------|
+| `send_message` | 核心 | 发送消息（文本/图片/@/回复），支持 `delay_minutes` 定时发送 |
+| `get_current_time` | 实用 | 获取当前时间 |
+| `get_current_date` | 实用 | 获取当前日期和星期 |
+| `calculate` | 实用 | 安全的数学表达式求值 |
+| `download_file` | 文件 | 下载群友发送的文件到本地 |
+| `read_file` | 文件 | 读取文件内容（PDF、Office、代码、图片等） |
+| `render_text` | 媒体 | 将 Markdown 文本渲染为图片 |
+
+工具通过 `config/builtin_tools.yaml` 或管理后台启用/禁用（核心工具 `send_message` 不可禁用）。
+
+---
+
+## 🔌 MCP 工具配置
+
+通过 MCP 协议接入外部工具，在 `config/mcp_servers.json` 中配置：
 
 ```json
 {
   "mcpServers": {
-    "search": {
-      "command": "npx",
-      "args": ["-y", "@tavily/mcp-server-tavily-search"],
-      "env": { "TAVILY_API_KEY": "xxx" }
+    "ddg-search": {
+      "command": "uvx",
+      "args": ["duckduckgo-mcp-server"]
+    },
+    "gemini-image": {
+      "command": "python",
+      "args": ["mcpserver/gemini-image-mcp/server.py"],
+      "env": {
+        "GEMINI_API_KEY": "sk-xxx",
+        "GEMINI_MODEL": "gemini-3-pro-image-preview"
+      }
     }
   }
 }
 ```
+
+项目已内置以下 MCP 服务器：
+
+| 服务器 | 工具 | 说明 |
+|--------|------|------|
+| `ddg-search` | `search`, `fetch_content` | DuckDuckGo 搜索和网页抓取 |
+| `gemini-image` | `generate_image` | Gemini AI 图片生成与编辑（支持传入图片路径进行魔改） |
 
 ---
 

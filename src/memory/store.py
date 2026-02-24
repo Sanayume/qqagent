@@ -37,13 +37,24 @@ def message_to_dict(message: BaseMessage) -> dict:
         # 多模态内容，转为纯文本存储
         content = message_to_storage_text(message)
 
+    # AIMessage with tool_calls: 只保留 send_message 的实际文本
+    if isinstance(message, AIMessage) and hasattr(message, "tool_calls") and message.tool_calls:
+        sent_parts = []
+        for tc in message.tool_calls:
+            if tc.get('name') == 'send_message':
+                args = tc.get('args', {})
+                t = args.get('text', '')
+                if t:
+                    sent_parts.append(t)
+                elif args.get('image'):
+                    sent_parts.append('[图片]')
+        content = "\n".join(sent_parts) if sent_parts else ""
+
     data = {
         "type": message.__class__.__name__,
         "content": content,
     }
-    # 保存额外字段
-    if hasattr(message, "tool_calls") and message.tool_calls:
-        data["tool_calls"] = message.tool_calls
+    # tool_call_id 保留用于 ToolMessage 识别
     if hasattr(message, "tool_call_id") and message.tool_call_id:
         data["tool_call_id"] = message.tool_call_id
     if hasattr(message, "name") and message.name:
@@ -65,10 +76,8 @@ def dict_to_message(data: dict) -> BaseMessage:
     elif msg_type == "SystemMessage":
         return SystemMessage(content=content)
     elif msg_type == "ToolMessage":
-        # 不恢复 ToolMessage，转为 AIMessage 纯文本
-        # 历史中的 ToolMessage 可能缺少匹配的 AIMessage(tool_calls)，导致 Gemini 验证失败
-        tool_name = data.get("name", "tool")
-        return AIMessage(content=f"[{tool_name}执行结果: {content[:200]}{'...' if len(content) > 200 else ''}]")
+        # 跳过 ToolMessage，返回 None（由调用方过滤）
+        return None
     else:
         # 默认当作 HumanMessage
         return HumanMessage(content=content)
@@ -119,15 +128,15 @@ class MemoryStore:
 
     def _serialize(self, messages: list[BaseMessage]) -> str:
         """消息列表 -> JSON 字符串"""
-        return json.dumps(
-            [message_to_dict(m) for m in messages],
-            ensure_ascii=False,
-        )
+        dicts = [message_to_dict(m) for m in messages]
+        # 过滤掉空内容的消息
+        dicts = [d for d in dicts if d.get("content")]
+        return json.dumps(dicts, ensure_ascii=False)
 
     def _deserialize(self, data: str) -> list[BaseMessage]:
         """JSON 字符串 -> 消息列表"""
         items = json.loads(data)
-        return [dict_to_message(item) for item in items]
+        return [m for m in (dict_to_message(item) for item in items) if m is not None]
 
     def _save_to_db(self, session_id: str, messages: list[BaseMessage]):
         """保存到数据库"""

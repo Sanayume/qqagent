@@ -62,6 +62,10 @@ class AgentState(TypedDict):
     # 控制标志
     should_respond: bool
 
+    # 循环计数（per-invocation，避免并发覆盖）
+    loop_count: int
+    loop_start_time: float
+
 
 class SessionContext(TypedDict):
     """会话上下文 (用于初始化状态)"""

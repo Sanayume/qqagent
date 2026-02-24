@@ -3,14 +3,27 @@ session:
   per_user_groups: []
   all_groups_per_user: false
 
+# 管理后台配置
+admin:
+  username: admin
+  password: admin123
+  port: 8088
+  secret_key: change-me-to-a-random-string
+
 # 消息聚合器配置
 aggregator:
-  initial_wait: 15.0        # 首条消息后等待时间（秒）
-  extended_wait: 5.0       # 有后续消息时的最大等待时间（秒）
+  initial_wait: 20.0        # 首条消息后等待时间（秒）
+  extended_wait: 10.0       # 有后续消息时的最大等待时间（秒）
   density_enabled: true     # 是否启用密度控制
-  density_threshold: 5     # 触发冷却的消息数阈值
+  density_threshold: 2     # 触发冷却的消息数阈值
   density_window: 60.0      # 密度检测时间窗口（秒）
   density_cooldown: 60.0    # 密度过高时的冷却等待时间（秒）
+
+# 私聊消息聚合器配置
+private_aggregator:
+  enabled: true
+  initial_wait: 3.0          # 首条消息后等待时间（秒）
+  extended_wait: 5.0          # 有后续消息时的最大等待时间（秒）
 
 presets:
   default:
@@ -18,3 +31,12 @@ presets:
 
 plugins:
   weather: true
+
+# 多模型 Fallback 配置（需要 2 个以上模型才会启用）
+# 按优先级排列，主模型失败时自动切换备用模型
+llm:
+  models:
+    - model: gemini-3-flash-preview
+    - model: claude-sonnet-4-6
+      api_key: "sk-WhXRtQ6llImK1NPP0KwXWZpbfDAjJzFkp2ZGawcf3MX9NhG6"
+      base_url: "https://yunwu.ai/v1"

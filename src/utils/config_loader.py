@@ -34,12 +34,27 @@ class DynamicConfig:
         "density_window": 60.0,
         "density_cooldown": 60.0,
     })
+
+    # 私聊消息聚合器配置
+    private_aggregator: Dict[str, Any] = field(default_factory=lambda: {
+        "enabled": True,
+        "initial_wait": 3.0,
+        "extended_wait": 5.0,
+    })
     
     # 提示词预设
     presets: Dict[str, Any] = field(default_factory=dict)
     
     # 插件开关
     plugins: Dict[str, bool] = field(default_factory=dict)
+
+    # 管理后台配置
+    admin: Dict[str, Any] = field(default_factory=lambda: {
+        "username": "admin",
+        "password": "admin123",
+        "port": 8088,
+        "secret_key": "change-me-to-a-random-string",
+    })
 
 
 class ConfigFileHandler(FileSystemEventHandler):
@@ -82,8 +97,10 @@ class ConfigLoader:
             # 更新配置对象
             self.config.session = data.get("session", self.config.session)
             self.config.aggregator = data.get("aggregator", self.config.aggregator)
+            self.config.private_aggregator = data.get("private_aggregator", self.config.private_aggregator)
             self.config.presets = data.get("presets", self.config.presets)
             self.config.plugins = data.get("plugins", self.config.plugins)
+            self.config.admin = data.get("admin", self.config.admin)
             
             log.success(f"Config loaded from {self.config_path}")
             

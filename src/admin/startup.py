@@ -64,13 +64,13 @@ def _build_frontend() -> bool:
         log.warning("package.json 不存在，跳过构建")
         return False
 
-    log.info("🔨 正在构建前端...")
+    log.info("正在构建前端...")
 
     try:
         # 检查 node_modules
         node_modules = FRONTEND_DIR / "node_modules"
         if not node_modules.exists():
-            log.info("📦 安装前端依赖...")
+            log.info("安装前端依赖...")
             subprocess.run(
                 ["npm", "install"],
                 cwd=FRONTEND_DIR,
@@ -86,14 +86,14 @@ def _build_frontend() -> bool:
             capture_output=True,
             text=True,
         )
-        log.success("✅ 前端构建完成")
+        log.success("前端构建完成")
         return True
 
     except subprocess.CalledProcessError as e:
-        log.error(f"❌ 前端构建失败: {e.stderr or e.stdout}")
+        log.error(f"前端构建失败: {e.stderr or e.stdout}")
         return False
     except FileNotFoundError:
-        log.warning("⚠️ 未找到 npm/npx，跳过前端构建")
+        log.warning("未找到 npm/npx，跳过前端构建")
         return False
 
 
@@ -117,7 +117,7 @@ async def start_admin_server(host: str = "0.0.0.0", port: int = 8088, auto_build
     from src.admin.services.log_service import get_log_service
     get_log_service()
 
-    log.info(f"🚀 正在启动 Admin Console: http://localhost:{port}")
+    log.info(f"正在启动 Admin Console: http://localhost:{port}")
     
     # 创建 uvicorn config
     config = uvicorn.Config(
@@ -132,7 +132,7 @@ async def start_admin_server(host: str = "0.0.0.0", port: int = 8088, auto_build
     # 作为后台任务运行
     _admin_task = asyncio.create_task(server.serve())
     
-    log.success(f"✅ Admin Console 已启动: http://localhost:{port}")
+    log.success(f"Admin Console 已启动: http://localhost:{port}")
 
 
 async def stop_admin_server():

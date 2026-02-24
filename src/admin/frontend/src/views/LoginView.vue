@@ -11,7 +11,6 @@ const username = ref('')
 const password = ref('')
 const error = ref('')
 const loading = ref(false)
-const showPassword = ref(false)
 
 async function handleLogin() {
   if (!username.value || !password.value) {

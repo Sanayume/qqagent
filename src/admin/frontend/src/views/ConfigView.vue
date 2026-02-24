@@ -75,7 +75,7 @@ onMounted(fetchConfig)
         <div class="text-miku-400 animate-pulse">加载中...</div>
       </div>
 
-      <textarea 
+      <textarea
         v-model="content"
         class="w-full h-full bg-transparent text-gray-200 font-mono text-sm p-6 outline-none resize-none custom-scrollbar leading-relaxed"
         spellcheck="false"

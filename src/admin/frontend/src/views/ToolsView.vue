@@ -10,9 +10,7 @@ import {
   Check,
   X,
   Shield,
-  Server,
-  ChevronDown,
-  ChevronRight
+  Server
 } from 'lucide-vue-next'
 
 interface Tool {
@@ -47,7 +45,6 @@ interface MCPServer {
 const tools = ref<Tool[]>([])
 const status = ref<ToolStatus | null>(null)
 const mcpServers = ref<Record<string, MCPServer>>({})
-const expandedServers = ref<Set<string>>(new Set())
 const loading = ref(false)
 const error = ref('')
 const successMsg = ref('')
@@ -117,18 +114,6 @@ const filteredTools = computed(() => {
 
 const builtinTools = computed(() => tools.value.filter(t => t.source === 'builtin'))
 const mcpTools = computed(() => tools.value.filter(t => t.source === 'mcp'))
-
-function toggleServer(name: string) {
-  if (expandedServers.value.has(name)) {
-    expandedServers.value.delete(name)
-  } else {
-    expandedServers.value.add(name)
-  }
-}
-
-function getServerTools(serverName: string) {
-  return tools.value.filter(t => t.source === 'mcp' && t.source_name === serverName)
-}
 
 const categories = computed(() => {
   const cats = new Set(tools.value.map(t => t.category))

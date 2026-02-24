@@ -4,7 +4,6 @@ JWT 认证模块
 提供 JWT Token 的生成、验证和依赖注入。
 """
 
-import os
 from datetime import datetime, timedelta
 from typing import Optional
 
@@ -13,10 +12,17 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from jose import JWTError, jwt
 from pydantic import BaseModel
 
-# 配置
-SECRET_KEY = os.getenv("ADMIN_SECRET_KEY", "your-secret-key-change-in-production")
+# 常量
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24  # 24小时
+
+
+def _get_secret_key() -> str:
+    """从 config.yaml 读取 secret_key"""
+    from src.utils.config_loader import get_config_loader
+    return get_config_loader().config.admin.get(
+        "secret_key", "change-me-to-a-random-string"
+    )
 
 
 class TokenData(BaseModel):
@@ -56,7 +62,7 @@ def create_access_token(username: str, expires_delta: Optional[timedelta] = None
         "iat": datetime.utcnow(),
     }
     
-    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+    encoded_jwt = jwt.encode(to_encode, _get_secret_key(), algorithm=ALGORITHM)
     return encoded_jwt
 
 
@@ -70,7 +76,7 @@ def verify_token(token: str) -> Optional[TokenData]:
         TokenData 如果验证成功，否则 None
     """
     try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        payload = jwt.decode(token, _get_secret_key(), algorithms=[ALGORITHM])
         username: str = payload.get("sub")
         exp: datetime = datetime.fromtimestamp(payload.get("exp"))
         

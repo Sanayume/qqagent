@@ -121,7 +121,10 @@ class MCPManager:
 
             # 可选参数
             if "env" in server_config:
-                converted["env"] = server_config["env"]
+                # 合并系统环境变量，避免子进程缺少 PATH 等关键变量
+                import os
+                merged_env = {**os.environ, **server_config["env"]}
+                converted["env"] = merged_env
             if "cwd" in server_config:
                 converted["cwd"] = server_config["cwd"]
             if "encoding" in server_config:
@@ -228,18 +231,18 @@ class MCPManager:
                 self._server_status[server_name].tools = [t.name for t in tools]
                 all_tools.extend(tools)
                 successful_servers.append(server_name)
-                log.info(f"  ✅ [{server_name}] loaded {len(tools)} tools: {[t.name for t in tools]}")
+                log.info(f"  [{server_name}] loaded {len(tools)} tools: {[t.name for t in tools]}")
                 
             except asyncio.TimeoutError:
                 self._server_status[server_name].status = "failed"
                 self._server_status[server_name].error = f"启动超时 (>{int(min(self.timeout / len(converted_config), 30))}s)"
-                log.warning(f"  ❌ [{server_name}] timeout")
+                log.warning(f"  [{server_name}] timeout")
                 
             except Exception as e:
                 error_msg = self._extract_error_details(e)
                 self._server_status[server_name].status = "failed"
                 self._server_status[server_name].error = error_msg
-                log.warning(f"  ❌ [{server_name}] failed: {error_msg}")
+                log.warning(f"  [{server_name}] failed: {error_msg}")
 
         self._tools = all_tools
         
@@ -423,7 +426,7 @@ class MCPManager:
 
         # 各服务器详情
         for name, status in self._server_status.items():
-            icon = "✅" if status.status == "success" else "❌" if status.status == "failed" else "⏳"
+            icon = "[OK]" if status.status == "success" else "[FAIL]" if status.status == "failed" else "[...]"
             lines.append(f"{icon} {name}")
             lines.append(f"   命令: {status.command}")
             lines.append(f"   状态: {status.status}")

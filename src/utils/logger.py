@@ -47,19 +47,19 @@ log = logger
 
 # ==================== 人性化错误格式化 ====================
 
-# 错误图标映射
+# 错误类型标记（无 emoji，保持简洁）
 ERROR_ICONS = {
-    "NetworkError": "🌐",
-    "ConnectionError": "🔌",
-    "TimeoutError": "⏱️",
-    "APIError": "📡",
-    "RateLimitError": "🚦",
-    "AuthError": "🔑",
-    "TokenExhaustedError": "💰",
-    "MediaError": "🖼️",
-    "DownloadError": "⬇️",
-    "OneBotError": "🤖",
-    "CircuitOpenError": "⚡",
+    "NetworkError": "[NET]",
+    "ConnectionError": "[CONN]",
+    "TimeoutError": "[TIMEOUT]",
+    "APIError": "[API]",
+    "RateLimitError": "[RATE]",
+    "AuthError": "[AUTH]",
+    "TokenExhaustedError": "[TOKEN]",
+    "MediaError": "[MEDIA]",
+    "DownloadError": "[DL]",
+    "OneBotError": "[BOT]",
+    "CircuitOpenError": "[CIRCUIT]",
 }
 
 
@@ -86,7 +86,7 @@ def format_error(
            → 建议: 等待 30 秒后重试
     """
     error_type = type(error).__name__
-    icon = ERROR_ICONS.get(error_type, "❌")
+    icon = ERROR_ICONS.get(error_type, "[ERR]")
 
     lines = []
 
@@ -142,21 +142,20 @@ def log_retry(
 ):
     """记录重试日志"""
     error_type = type(error).__name__
-    icon = "🔄"
 
     log.warning(
-        f"{icon} 重试 {context} ({attempt}/{max_attempts})\n"
-        f"   → 原因: [{error_type}] {error}\n"
-        f"   → 等待: {delay:.1f}s"
+        f"[RETRY] {context} ({attempt}/{max_attempts})\n"
+        f"   -> 原因: [{error_type}] {error}\n"
+        f"   -> 等待: {delay:.1f}s"
     )
 
 
 def log_circuit_open(name: str, remaining: float, last_error: Exception):
     """记录熔断器开启日志"""
     log.warning(
-        f"⚡ 熔断器 [{name}] 已开启\n"
-        f"   → 剩余冷却: {remaining:.0f}s\n"
-        f"   → 最近错误: {last_error}"
+        f"[CIRCUIT] 熔断器 [{name}] 已开启\n"
+        f"   -> 剩余冷却: {remaining:.0f}s\n"
+        f"   -> 最近错误: {last_error}"
     )
 
 
@@ -179,32 +178,23 @@ def log_connection_status(
         delay: 下次重试延迟
         error: 错误信息
     """
-    icons = {
-        "connecting": "🔗",
-        "connected": "✅",
-        "disconnected": "🔌",
-        "reconnecting": "🔄",
-        "failed": "❌",
-    }
-    icon = icons.get(status, "•")
-
     if status == "connected":
-        log.success(f"{icon} 已连接: {target}")
+        log.success(f"已连接: {target}")
     elif status == "connecting":
-        log.info(f"{icon} 正在连接: {target}")
+        log.info(f"正在连接: {target}")
     elif status == "disconnected":
-        msg = f"{icon} 连接断开: {target}"
+        msg = f"连接断开: {target}"
         if error:
-            msg += f"\n   → 原因: {error}"
+            msg += f"\n   -> 原因: {error}"
         log.warning(msg)
     elif status == "reconnecting":
-        msg = f"{icon} 正在重连: {target}"
+        msg = f"正在重连: {target}"
         if attempt and max_attempts:
             msg += f" ({attempt}/{max_attempts})"
         if delay:
-            msg += f"\n   → 等待: {delay:.1f}s (指数退避)"
+            msg += f"\n   -> 等待: {delay:.1f}s (指数退避)"
         if error:
-            msg += f"\n   → 上次错误: {error}"
+            msg += f"\n   -> 上次错误: {error}"
         log.warning(msg)
     elif status == "failed":
-        log.error(f"{icon} 连接失败: {target}\n   → 错误: {error}")
+        log.error(f"连接失败: {target}\n   -> 错误: {error}")

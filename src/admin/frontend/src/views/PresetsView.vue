@@ -20,7 +20,8 @@ async function fetchPresets() {
     
     // 如果列表不为空且未选中，默认选第一个
     if (!currentPresetName.value && presets.value.length > 0) {
-      selectPreset(presets.value[0])
+      const first = presets.value[0]
+      if (first) selectPreset(first)
     }
   } catch (e) {
     console.error(e)
@@ -107,7 +108,8 @@ async function deletePreset() {
       // 重置 hasChanges 避免选中触发 confirm
       currentContent.value = ''
       originalContent.value = ''
-      selectPreset(presets.value[0])
+      const first = presets.value[0]
+      if (first) selectPreset(first)
     } else {
       currentPresetName.value = null
       currentContent.value = ''

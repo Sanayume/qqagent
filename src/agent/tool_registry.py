@@ -366,10 +366,13 @@ def init_builtin_tools() -> ToolRegistry:
     """
     from src.agent.tools import (
         send_message,
-        get_current_time,
-        get_current_date,
-        calculate,
+        download_file,
+        read_file,
+        render_text,
     )
+    from src.agent.tools_web import web_search
+    from src.agent.tools_code import run_code
+    from src.agent.tools_openclaw import openclaw_agent
 
     registry = get_tool_registry()
 
@@ -384,24 +387,48 @@ def init_builtin_tools() -> ToolRegistry:
 
     # 实用工具 - 可禁用
     registry.register(
-        get_current_time,
+        download_file,
         category=ToolCategory.UTILITY,
-        description="获取当前时间",
-        tags=["time", "datetime"],
+        description="下载用户发送的文件到本地",
+        tags=["file", "download"],
     )
 
     registry.register(
-        get_current_date,
+        read_file,
         category=ToolCategory.UTILITY,
-        description="获取当前日期和星期",
-        tags=["date", "datetime"],
+        description="读取文件内容（支持 PDF、文本、代码、Office）",
+        tags=["file", "read"],
     )
 
     registry.register(
-        calculate,
+        render_text,
+        category=ToolCategory.MEDIA,
+        description="将文本渲染成图片（支持 Markdown）",
+        tags=["render", "image", "markdown"],
+    )
+
+    # 搜索工具
+    registry.register(
+        web_search,
+        category=ToolCategory.SEARCH,
+        description="Brave Search 网页搜索",
+        tags=["search", "web"],
+    )
+
+    # 代码执行工具
+    registry.register(
+        run_code,
         category=ToolCategory.UTILITY,
-        description="计算数学表达式",
-        tags=["math", "calculator"],
+        description="在沙箱中执行代码",
+        tags=["code", "sandbox"],
+    )
+
+    # OpenClaw sub-agent（可禁用）
+    registry.register(
+        openclaw_agent,
+        category=ToolCategory.CUSTOM,
+        description="委托复杂任务给 OpenClaw sub-agent",
+        tags=["subagent", "openclaw"],
     )
 
     log.info(f"Builtin tools initialized: {registry.get_status()}")

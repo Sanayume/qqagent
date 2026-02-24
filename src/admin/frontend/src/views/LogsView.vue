@@ -143,7 +143,7 @@ onUnmounted(() => {
       <div class="flex items-center gap-4">
         <h1 class="text-2xl font-bold text-white">实时日志</h1>
         <div class="flex items-center gap-2 px-3 py-1 rounded-full bg-night-950 border border-gray-800">
-          <div 
+          <div
             class="w-2 h-2 rounded-full transition-colors duration-300"
             :class="isConnected ? 'bg-green-500 shadow-[0_0_8px_rgba(34,197,94,0.6)]' : 'bg-red-500 animate-pulse'"
           ></div>
@@ -164,7 +164,7 @@ onUnmounted(() => {
               : 'text-gray-500 hover:text-gray-300'"
           >
             {{ level }}
-            <span v-if="levelCounts[level] > 0" class="ml-1 opacity-60">({{ levelCounts[level] }})</span>
+            <span v-if="(levelCounts[level] ?? 0) > 0" class="ml-1 opacity-60">({{ levelCounts[level] }})</span>
           </button>
         </div>
         

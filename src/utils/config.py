@@ -74,7 +74,14 @@ class AgentConfig(BaseSettings):
     silent_errors: bool = Field(default=False, description="遇到未处理错误时是否静默（不发送错误提示）")
     
     # History
-    max_history_messages: int = Field(default=70, description="每个会话保留的最大历史消息数")
+    max_history_messages: int = Field(default=200, description="每个会话保留的最大历史消息数")
+
+    # Voice / STT
+    voice_mode: str = Field(default="auto", description="语音处理模式: stt / native / auto")
+    stt_provider: str = Field(default="noop", description="STT 提供者: noop / 自定义")
+    stt_api_base: str = Field(default="", description="STT API 地址")
+    stt_api_key: str = Field(default="", description="STT API 密钥")
+    stt_model: str = Field(default="whisper-1", description="STT 模型名")
 
 
 class Settings(BaseSettings):

@@ -13,9 +13,9 @@ import time
 from dataclasses import dataclass, field
 from enum import Enum
 from functools import wraps
-from typing import Callable, TypeVar, Any
+from typing import Callable, TypeVar
 
-from src.core.exceptions import AgentError, RateLimitError, AuthError
+from src.core.exceptions import AgentError
 from src.utils.logger import log
 
 T = TypeVar("T")
@@ -90,7 +90,7 @@ def retry_with_backoff(
 
                     # 检查是否可重试
                     if isinstance(e, AgentError) and not e.retryable:
-                        log.warning(f"❌ 不可重试的错误: {e}")
+                        log.warning(f"不可重试的错误: {e}")
                         raise
 
                     # 最后一次尝试，不再重试
@@ -109,9 +109,9 @@ def retry_with_backoff(
                         on_retry(e, attempt + 1, delay)
                     else:
                         log.warning(
-                            f"🔄 重试 {func.__name__} ({attempt + 1}/{max_retries})\n"
-                            f"   → 原因: {e}\n"
-                            f"   → 等待: {delay:.1f}s"
+                            f"[RETRY] {func.__name__} ({attempt + 1}/{max_retries})\n"
+                            f"   -> 原因: {e}\n"
+                            f"   -> 等待: {delay:.1f}s"
                         )
 
                     await asyncio.sleep(delay)
@@ -169,7 +169,7 @@ class CircuitBreaker:
             if time.time() - self._last_failure_time >= self.recovery_timeout:
                 self._state = CircuitState.HALF_OPEN
                 self._half_open_calls = 0
-                log.info(f"🔓 熔断器 [{self.name}] 进入半开状态，允许探测请求")
+                log.info(f"熔断器 [{self.name}] 进入半开状态，允许探测请求")
         return self._state
 
     def record_success(self):
@@ -177,7 +177,7 @@ class CircuitBreaker:
         if self._state == CircuitState.HALF_OPEN:
             self._state = CircuitState.CLOSED
             self._failure_count = 0
-            log.success(f"✅ 熔断器 [{self.name}] 恢复正常")
+            log.success(f"熔断器 [{self.name}] 恢复正常")
         elif self._state == CircuitState.CLOSED:
             # 成功时重置失败计数
             self._failure_count = 0
@@ -190,16 +190,16 @@ class CircuitBreaker:
         if self._state == CircuitState.HALF_OPEN:
             # 半开状态下失败，立即回到 OPEN
             self._state = CircuitState.OPEN
-            log.warning(f"⚡ 熔断器 [{self.name}] 探测失败，重新熔断")
+            log.warning(f"熔断器 [{self.name}] 探测失败，重新熔断")
 
         elif self._state == CircuitState.CLOSED:
             if self._failure_count >= self.failure_threshold:
                 self._state = CircuitState.OPEN
                 log.error(
-                    f"⚡ 熔断器 [{self.name}] 触发!\n"
-                    f"   → 连续失败 {self._failure_count} 次\n"
-                    f"   → 暂停 {self.recovery_timeout}s\n"
-                    f"   → 最近错误: {error}"
+                    f"熔断器 [{self.name}] 触发!\n"
+                    f"   -> 连续失败 {self._failure_count} 次\n"
+                    f"   -> 暂停 {self.recovery_timeout}s\n"
+                    f"   -> 最近错误: {error}"
                 )
 
     def allow_request(self) -> bool:
@@ -245,7 +245,7 @@ class CircuitBreaker:
         self._state = CircuitState.CLOSED
         self._failure_count = 0
         self._half_open_calls = 0
-        log.info(f"🔄 熔断器 [{self.name}] 已手动重置")
+        log.info(f"熔断器 [{self.name}] 已手动重置")
 
 
 @dataclass

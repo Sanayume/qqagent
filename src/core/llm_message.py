@@ -41,6 +41,7 @@ def build_text_message(text: str) -> HumanMessage:
 def build_multimodal_message(
     text: str,
     images: list[tuple[str, str]],
+    audio: list[tuple[bytes, str]] | None = None,
 ) -> HumanMessage:
     """构建多模态 HumanMessage (含图片)
 
@@ -66,7 +67,7 @@ def build_multimodal_message(
     Note:
         如果 images 为空，返回纯文本消息。
     """
-    if not images:
+    if not images and not audio:
         return HumanMessage(content=text)
 
     content: list[dict] = []
@@ -83,6 +84,18 @@ def build_multimodal_message(
                 "url": f"data:{mime_type};base64,{b64_data}"
             }
         })
+
+    # 音频部分 (通过 data URL 传递，兼容 Gemini OpenAI 兼容 API)
+    if audio:
+        import base64
+        for audio_bytes, audio_fmt in audio:
+            b64 = base64.b64encode(audio_bytes).decode("utf-8")
+            content.append({
+                "type": "image_url",
+                "image_url": {
+                    "url": f"data:audio/{audio_fmt};base64,{b64}"
+                }
+            })
 
     return HumanMessage(content=content)
 
@@ -293,47 +306,7 @@ def strip_images_from_message(message: HumanMessage) -> HumanMessage:
     return HumanMessage(content=text)
 
 
-# ==================== 批量操作 ====================
-
-
-def merge_text_messages(messages: list[str]) -> str:
-    """合并多条文本为一条
-
-    Args:
-        messages: 文本列表
-
-    Returns:
-        合并后的文本，用换行分隔
-    """
-    return "\n".join(m for m in messages if m)
-
-
-def build_context_message(
-    main_text: str,
-    reply_context: str | None = None,
-    forward_summary: str | None = None,
-) -> str:
-    """构建包含上下文的文本（旧版，保持兼容）
-
-    Args:
-        main_text: 主要文本内容
-        reply_context: 引用消息的上下文
-        forward_summary: 合并转发的摘要
-
-    Returns:
-        组合后的完整文本
-    """
-    parts = []
-
-    if reply_context:
-        parts.append(f"[引用消息: {reply_context}]")
-
-    if forward_summary:
-        parts.append(f"[合并转发:\n{forward_summary}]")
-
-    parts.append(main_text)
-
-    return "\n".join(parts)
+# ==================== 富上下文消息 ====================
 
 
 def build_rich_context_message(
@@ -346,10 +319,23 @@ def build_rich_context_message(
     reply_context: str | None = None,
     at_targets: list[str] | None = None,
     forward_summary: str | None = None,
+    file_descriptions: list[str] | None = None,
+    image_paths: list[str] | None = None,
+    timestamp: int | None = None,
 ) -> str:
-    """构建包含完整上下文的消息文本
+    """构建包含完整上下文的消息文本（聊天记录风格，与群聊聚合格式一致）
 
-    让 LLM 知道：谁发的、消息ID、引用了什么、@了谁
+    格式与 aggregator.py 中 PendingMessage.format() 保持一致，
+    让 LLM 无论收到单条消息还是聚合消息，都能用统一的格式理解对话关系。
+
+    输出示例（私聊）:
+        张三(123456) 2026年2月8日14时30分 #1001:
+        你好啊
+
+    输出示例（群聊，带回复）:
+        张三(123456) 2026年2月8日14时30分 #1001 回复李四 @王五:
+        > 李四说的原文
+        你好啊
 
     Args:
         main_text: 主要文本内容
@@ -361,51 +347,86 @@ def build_rich_context_message(
         reply_context: 引用消息的内容描述
         at_targets: @ 的目标 QQ 号列表
         forward_summary: 合并转发的摘要
+        file_descriptions: 文件描述列表
+        image_paths: 图片本地路径列表（供工具使用）
+        timestamp: 消息时间戳（epoch 秒），为 None 时使用当前时间
 
     Returns:
         格式化的完整消息文本
     """
+    from datetime import datetime
+
     parts = []
 
-    # 消息上下文部分
-    context_lines = []
+    # === 头部行: 发送者(QQ) 时间 #消息ID 回复XXX @YYY: ===
+    header = ""
+    if sender_name and sender_qq:
+        header = f"{sender_name}({sender_qq})"
+    elif sender_qq:
+        header = str(sender_qq)
+    elif sender_name:
+        header = sender_name
 
-    if sender_name or sender_qq:
-        if sender_name and sender_qq:
-            context_lines.append(f"发送者: {sender_name} (QQ: {sender_qq})")
-        elif sender_qq:
-            context_lines.append(f"发送者 QQ: {sender_qq}")
-        else:
-            context_lines.append(f"发送者: {sender_name}")
+    # 时间
+    ts = timestamp if timestamp else int(datetime.now().timestamp())
+    dt = datetime.fromtimestamp(ts)
+    time_str = f"{dt.year}年{dt.month}月{dt.day}日{dt.hour}时{dt.minute}分"
+    header += f" {time_str}"
 
     if message_id:
-        context_lines.append(f"消息ID: {message_id}")
+        header += f" #{message_id}"
 
-    if group_id:
-        context_lines.append(f"群号: {group_id}")
+    # 回复关系
+    if reply_context:
+        if ": " in reply_context:
+            reply_sender = reply_context.split(": ")[0]
+            header += f" 回复{reply_sender}"
+        else:
+            header += " 回复"
 
-    if reply_to_id and reply_context:
-        context_lines.append(f"引用: 消息ID {reply_to_id}，内容为「{reply_context}」")
-    elif reply_context:
-        context_lines.append(f"引用: {reply_context}")
-
+    # @ 目标
     if at_targets:
-        context_lines.append(f"@了: {', '.join(at_targets)}")
+        at_list = " ".join(f"@{t}" for t in at_targets)
+        header += f" {at_list}"
 
-    if context_lines:
-        parts.append("[消息上下文]\n" + "\n".join(context_lines))
+    header += ":"
+    parts.append(header)
 
-    # 合并转发
-    if forward_summary:
-        parts.append(f"[合并转发]\n{forward_summary}")
+    # === 引用内容（缩进显示） ===
+    if reply_context:
+        if ": " in reply_context:
+            reply_content = reply_context.split(": ", 1)[1]
+        else:
+            reply_content = reply_context
+        if len(reply_content) > 80:
+            reply_content = reply_content[:80] + "..."
+        parts.append(f"> {reply_content}")
 
-    # 消息正文
+    # === 消息正文 ===
     if main_text:
-        parts.append(f"[消息内容]\n{main_text}")
-    else:
-        parts.append("[消息内容]\n（无文字）")
+        parts.append(main_text)
+    elif image_paths:
+        parts.append(f"[图片x{len(image_paths)}]")
 
-    return "\n\n".join(parts)
+    # === 文件附件 ===
+    if file_descriptions:
+        parts.append("\n".join(file_descriptions))
+
+    # === 转发摘要 ===
+    if forward_summary:
+        parts.append(f"[转发消息]\n{forward_summary}")
+
+    # === 图片路径（供工具使用） ===
+    if image_paths:
+        parts.append("[图片路径]")
+        parts.append("\n".join(image_paths))
+
+    # === 包装：私聊/群聊标识 ===
+    body = "\n".join(parts)
+    if group_id:
+        return f"[群{group_id} 聊天记录]\n\n{body}"
+    else:
+        return body
 
 
 # ==================== 工具消息处理 ====================
@@ -463,8 +484,8 @@ def extract_tool_images(messages: list[BaseMessage]) -> list[tuple[str, str]]:
                 if item.get("type") == "image":
                     base64_data = item.get("base64", "")
                     if base64_data:
-                        # 根据 base64 开头检测 MIME 类型
-                        mime_type = _detect_image_mime_from_base64(base64_data)
+                        # 优先使用工具返回的 mime_type，否则自动检测
+                        mime_type = item.get("mime_type") or _detect_image_mime_from_base64(base64_data)
                         images.append((base64_data, mime_type))
 
     return images

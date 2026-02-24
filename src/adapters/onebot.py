@@ -56,6 +56,7 @@ class OneBotEvent:
     # Notice/Request fields
     notice_type: str | None = None
     request_type: str | None = None
+    file: dict | None = None  # 文件上传事件的文件信息
     
     # Meta fields
     meta_event_type: str | None = None
@@ -82,6 +83,7 @@ class OneBotEvent:
             sender=data.get("sender", {}),
             notice_type=data.get("notice_type"),
             request_type=data.get("request_type"),
+            file=data.get("file"),
             meta_event_type=data.get("meta_event_type"),
             self_id=data.get("self_id"),
             time=data.get("time"),
@@ -91,7 +93,16 @@ class OneBotEvent:
     @property
     def is_message(self) -> bool:
         return self.post_type == "message"
-    
+
+    @property
+    def is_notice(self) -> bool:
+        return self.post_type == "notice"
+
+    @property
+    def is_file_upload(self) -> bool:
+        """是否是文件上传事件（群文件或私聊文件）"""
+        return self.is_notice and self.notice_type in ("group_upload", "offline_file")
+
     @property
     def is_private(self) -> bool:
         return self.message_type == "private"
@@ -287,7 +298,11 @@ class OneBotAdapter:
         while self._running:
             try:
                 log_connection_status("connecting", f"NapCat ({self.ws_url})")
-                async with ws_connect(self.ws_url, extra_headers=headers) as ws:
+                async with ws_connect(
+                    self.ws_url,
+                    extra_headers=headers,
+                    max_size=200 * 1024 * 1024,  # 200MB，支持大文件传输
+                ) as ws:
                     self._ws_forward = ws
                     attempt = 0  # 连接成功，重置计数
                     log_connection_status("connected", f"NapCat (Forward WS)")
@@ -387,6 +402,7 @@ class OneBotAdapter:
             handle_client,
             self.reverse_host,
             self.reverse_port,
+            max_size=200 * 1024 * 1024,  # 200MB，支持大文件传输
         )
         
         log.success(f"Reverse WS server listening on {self.reverse_host}:{self.reverse_port}")
@@ -499,7 +515,7 @@ class OneBotAdapter:
 
     async def send_msg(self, event: OneBotEvent, message: str | list) -> dict:
         """根据事件类型发送消息（带限速）"""
-        if event.is_group:
+        if event.group_id:
             return await self.send_group_msg(event.group_id, message)
         else:
             return await self.send_private_msg(event.user_id, message)
@@ -509,6 +525,7 @@ class OneBotAdapter:
         event: OneBotEvent,
         text: str = "",
         image: str = "",
+        record: str = "",
         at_users: list[int] | None = None,
         reply_to: int = 0,
     ) -> dict:
@@ -530,12 +547,12 @@ class OneBotAdapter:
 
         # 1. 回复（必须在最前面）
         if reply_to:
-            segments.append(reply(reply_to))
+            segments.append({"type": "reply", "data": {"id": str(reply_to)}})
 
         # 2. @ 用户
         if at_users:
             for qq in at_users[:5]:  # 最多 @ 5 人
-                segments.append(at(qq))
+                segments.append({"type": "at", "data": {"qq": str(qq)}})
 
         # 3. 文本
         if text:
@@ -547,18 +564,107 @@ class OneBotAdapter:
         # 4. 图片
         if image:
             try:
-                img_b64, _ = await download_and_encode(image)
+                img_b64 = await self._resolve_image(image)
                 segments.append({"type": "image", "data": {"file": f"base64://{img_b64}"}})
             except Exception as e:
-                log.warning(f"下载图片失败: {e}")
+                log.warning(f"处理图片失败: {e}")
                 segments.append({"type": "text", "data": {"text": "[图片加载失败]"}})
 
+        # 5. 语音（单独发送，不和文本/图片混在一条消息里）
+        if record:
+            # 先发文本/图片部分
+            if segments:
+                await self.send_msg(event, segments)
+                segments = []
+            # 发送语音（自动切分超长音频）
+            await self._send_record(event, record)
+
         if not segments:
-            log.warning("send_rich_msg: 空消息，跳过")
+            if not record:
+                log.warning("send_rich_msg: 空消息，跳过")
             return {"status": "ok", "data": None}
 
         return await self.send_msg(event, segments)
-    
+
+    async def _send_record(self, event: OneBotEvent, record: str):
+        """发送语音，超过 55 秒自动切分多条发送"""
+        from pathlib import Path
+        from src.core.media import get_audio_duration, split_audio
+
+        # 非本地文件（base64/URL），直接发不切分
+        if record.startswith(("base64://", "http://", "https://")):
+            await self.send_msg(event, [{"type": "record", "data": {"file": record}}])
+            return
+
+        # 解析本地路径
+        path = record
+        if path.startswith("file:///"):
+            path = path[8:]
+        elif path.startswith("file://"):
+            path = path[7:]
+
+        from src.utils.path import fix_escaped_path
+        path = fix_escaped_path(path)
+        p = Path(path)
+        if not p.exists():
+            log.warning(f"语音文件不存在: {path}")
+            return
+        p = p.resolve()
+
+        file_uri = f"file:///{p}"
+
+        duration = get_audio_duration(str(p))
+        if duration is not None and duration > 55:
+            log.info(f"语音时长 {duration:.1f}s > 55s，自动切分")
+            parts = split_audio(str(p), max_seconds=55)
+            for part in parts:
+                await self.send_msg(event, [{"type": "record", "data": {"file": f"file:///{Path(part).resolve()}"}}])
+        else:
+            await self.send_msg(event, [{"type": "record", "data": {"file": file_uri}}])
+
+    async def _resolve_image(self, image: str) -> str:
+        """解析图片为 base64
+
+        支持:
+        - HTTP/HTTPS URL: 下载并编码
+        - 本地文件路径: 直接读取并编码
+        - base64:// 前缀: 直接返回
+
+        Args:
+            image: 图片路径或 URL
+
+        Returns:
+            base64 编码的图片数据
+        """
+        import base64
+        from pathlib import Path
+
+        # 已经是 base64
+        if image.startswith("base64://"):
+            return image[9:]
+
+        # HTTP URL - 下载
+        if image.startswith("http://") or image.startswith("https://"):
+            b64, _ = await download_and_encode(image)
+            return b64
+
+        # 本地文件路径
+        # 处理 file:// 前缀
+        if image.startswith("file:///"):
+            image = image[8:]
+        elif image.startswith("file://"):
+            image = image[7:]
+
+        path = Path(image)
+        if not path.exists():
+            from src.utils.path import fix_escaped_path
+            path = Path(fix_escaped_path(image))
+        if path.exists() and path.is_file():
+            data = path.read_bytes()
+            return base64.b64encode(data).decode("utf-8")
+
+        raise ValueError(f"无法解析图片: {image}")
+
     async def get_login_info(self) -> dict:
         """获取登录信息"""
         result = await self.call_api("get_login_info")
@@ -634,54 +740,24 @@ class OneBotAdapter:
         """
         return await self.call_api("get_forward_msg", {"id": forward_id})
 
+    async def get_file(self, file_id: str) -> dict | None:
+        """下载文件并获取本地路径
 
-# ==================== Helper Functions ====================
+        Args:
+            file_id: 文件 ID
 
-def build_message(*segments) -> list[dict]:
-    """构建消息段数组
-    
-    Example:
-        msg = build_message(
-            text("Hello "),
-            at(123456),
-            text("!"),
-            image("file:///path/to/image.png")
-        )
-    """
-    return list(segments)
-
-
-def text(content: str) -> dict:
-    """文本消息段"""
-    return {"type": "text", "data": {"text": content}}
-
-
-def at(qq: int | str) -> dict:
-    """@消息段"""
-    return {"type": "at", "data": {"qq": str(qq)}}
-
-
-def image(file: str, type_: str = "", url: str = "") -> dict:
-    """图片消息段
-    
-    Args:
-        file: 图片文件路径 (file:///, base64://, http://)
-        type_: 图片类型 (flash 闪照, show 秀图)
-        url: 图片URL
-    """
-    data = {"file": file}
-    if type_:
-        data["type"] = type_
-    if url:
-        data["url"] = url
-    return {"type": "image", "data": data}
-
-
-def face(id_: int) -> dict:
-    """QQ表情"""
-    return {"type": "face", "data": {"id": str(id_)}}
-
-
-def reply(message_id: int) -> dict:
-    """回复消息段"""
-    return {"type": "reply", "data": {"id": str(message_id)}}
+        Returns:
+            文件信息字典 {"path": "...", "size": 123}，失败返回 None
+        """
+        try:
+            result = await self.call_api("get_file", {"file_id": file_id})
+            log.debug(f"get_file 返回: status={result.get('status')}, data keys={result.get('data', {}).keys() if result.get('data') else None}")
+            if result.get("status") == "ok":
+                data = result.get("data", {})
+                return {
+                    "path": data.get("file", data.get("url", "")),
+                    "size": data.get("file_size", 0),
+                }
+        except Exception as e:
+            log.warning(f"get_file 失败: {e}")
+        return None

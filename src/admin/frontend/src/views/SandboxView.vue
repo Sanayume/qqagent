@@ -27,6 +27,8 @@ interface Message {
   group_id: number | null
   target_qq: number | null
   sender?: User
+  reply_to?: number
+  at_users?: number[]
 }
 
 // ==================== State ====================
@@ -52,7 +54,6 @@ function getUser(qq: number) {
 }
 
 // ==================== Computed ====================
-const currentUser = computed(() => users.value.find(u => u.qq === currentUserQQ.value))
 const currentChatName = computed(() => {
   if (currentChatType.value === 'group') {
     const g = groups.value.find(g => g.group_id === currentChatId.value)
@@ -97,7 +98,9 @@ async function fetchState() {
   
   // 确保有默认选中
   if (!currentUserQQ.value && users.value.length > 0) {
-    currentUserQQ.value = users.value.find(u => !u.is_bot)?.qq || users.value[0].qq
+    const nonBot = users.value.find(u => !u.is_bot)
+    const first = users.value[0]
+    currentUserQQ.value = nonBot?.qq ?? first?.qq ?? 0
   }
 }
 
@@ -164,12 +167,12 @@ async function sendMessage() {
 }
 
 // 辅助方法
-function getAvatar(qq: int) {
+function getAvatar(qq: number) {
   const u = users.value.find(u => u.qq === qq)
   return u?.avatar || `https://q1.qlogo.cn/g?b=qq&nk=${qq}&s=100`
 }
 
-function getNickname(qq: int) {
+function getNickname(qq: number) {
   const u = users.value.find(u => u.qq === qq)
   return u?.nickname || `${qq}`
 }

@@ -94,18 +94,43 @@ async def change_password(
     request: ChangePasswordRequest,
     current_user: str = Depends(get_current_user),
 ):
-    """修改密码"""
+    """修改密码
+
+    密码现在通过 config.yaml 的 admin.password 字段管理，
+    修改后会通过热重载自动生效。
+    """
     user_service = get_user_service()
-    success = user_service.change_password(
-        current_user,
-        request.old_password,
-        request.new_password,
-    )
-    
-    if not success:
+
+    # 验证旧密码
+    user = user_service.authenticate(current_user, request.old_password)
+    if user is None:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="旧密码错误",
         )
-    
-    return {"message": "密码修改成功"}
+
+    # 更新 config.yaml 中的密码
+    from src.utils.config_loader import get_config_loader
+    loader = get_config_loader()
+    import yaml
+
+    try:
+        with open(loader.config_path, "r", encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+
+        if "admin" not in data:
+            data["admin"] = {}
+        data["admin"]["password"] = request.new_password
+
+        with open(loader.config_path, "w", encoding="utf-8") as f:
+            yaml.dump(data, f, allow_unicode=True, sort_keys=False)
+
+        # 手动触发重载
+        loader.reload()
+
+        return {"message": "密码修改成功"}
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"写入配置文件失败: {e}",
+        )

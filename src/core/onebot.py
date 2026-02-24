@@ -41,10 +41,15 @@ class ParsedMessage:
     at_targets: list[str] = field(default_factory=list)
     face_ids: list[int] = field(default_factory=list)
     mface_summaries: list[str] = field(default_factory=list)
-    file_urls: list[str] = field(default_factory=list)
+    file_paths: list[str] = field(default_factory=list)
     file_names: list[str] = field(default_factory=list)
+    file_sizes: list[int] = field(default_factory=list)
+    file_ids: list[str] = field(default_factory=list)
     has_record: bool = False
     has_video: bool = False
+    record_url: str | None = None
+    record_file: str | None = None
+    record_file_id: str | None = None
     raw_segments: list[dict] = field(default_factory=list)
 
     def has_images(self) -> bool:
@@ -53,7 +58,7 @@ class ParsedMessage:
 
     def has_files(self) -> bool:
         """是否包含文件"""
-        return bool(self.file_urls or self.file_names)
+        return bool(self.file_paths or self.file_names or self.file_ids)
 
     def has_reply(self) -> bool:
         """是否是回复消息"""
@@ -144,15 +149,23 @@ def parse_segments(segments: list[dict]) -> ParsedMessage:
             result.mface_summaries.append(summary)
 
         elif seg_type == "file":
-            url = data.get("url", "")
             name = data.get("name", data.get("file", ""))
-            if url:
-                result.file_urls.append(url)
+            size = data.get("file_size", data.get("size", 0))
+            file_id = data.get("file_id", "")
             if name:
                 result.file_names.append(name)
+            if file_id:
+                result.file_ids.append(file_id)
+            try:
+                result.file_sizes.append(int(size) if size else 0)
+            except (ValueError, TypeError):
+                result.file_sizes.append(0)
 
         elif seg_type == "record":
             result.has_record = True
+            result.record_url = data.get("url")
+            result.record_file = data.get("file")
+            result.record_file_id = data.get("file_id")
 
         elif seg_type == "video":
             result.has_video = True
@@ -500,7 +513,7 @@ def make_text_description(parsed: ParsedMessage) -> str:
         parts.append(f"[图片x{count}]")
 
     if parsed.has_files():
-        count = len(parsed.file_urls) or len(parsed.file_names)
+        count = len(parsed.file_names) or len(parsed.file_ids)
         parts.append(f"[文件x{count}]")
 
     if parsed.has_record:
@@ -522,3 +535,62 @@ def make_text_description(parsed: ParsedMessage) -> str:
         parts.append(parsed.text)
 
     return " ".join(parts)
+
+
+def format_file_size(size_bytes: int) -> str:
+    """格式化文件大小为可读字符串
+
+    Args:
+        size_bytes: 文件大小（字节）
+
+    Returns:
+        格式化的大小字符串，如 "1.5MB"
+    """
+    if size_bytes <= 0:
+        return "未知大小"
+
+    if size_bytes < 1024:
+        return f"{size_bytes}B"
+    elif size_bytes < 1024 * 1024:
+        return f"{size_bytes / 1024:.1f}KB"
+    elif size_bytes < 1024 * 1024 * 1024:
+        return f"{size_bytes / (1024 * 1024):.1f}MB"
+    else:
+        return f"{size_bytes / (1024 * 1024 * 1024):.2f}GB"
+
+
+def get_file_descriptions(parsed: ParsedMessage) -> list[str]:
+    """获取文件的详细描述列表
+
+    Args:
+        parsed: 解析后的消息
+
+    Returns:
+        文件描述列表，每个元素格式如 "[文件: xxx.pdf, 大小: 1.5MB, file_id: ..., file_path: ...]"
+    """
+    descriptions = []
+    count = max(
+        len(parsed.file_names),
+        len(parsed.file_paths),
+        len(parsed.file_sizes),
+        len(parsed.file_ids),
+    )
+
+    for i in range(count):
+        name = parsed.file_names[i] if i < len(parsed.file_names) else "未知文件"
+        file_path = parsed.file_paths[i] if i < len(parsed.file_paths) else ""
+        size = parsed.file_sizes[i] if i < len(parsed.file_sizes) else 0
+        file_id = parsed.file_ids[i] if i < len(parsed.file_ids) else ""
+
+        size_str = format_file_size(size)
+
+        parts = [f"文件: {name}", f"大小: {size_str}"]
+        if file_id:
+            parts.append(f"file_id: {file_id}")
+        if file_path:
+            parts.append(f"file_path: {file_path}")
+
+        desc = "[" + ", ".join(parts) + "]"
+        descriptions.append(desc)
+
+    return descriptions

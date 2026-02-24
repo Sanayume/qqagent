@@ -33,6 +33,14 @@ MIME_SIGNATURES: dict[bytes, str] = {
     b"BM": "image/bmp",
     b"\x00\x00\x01\x00": "image/x-icon",  # ICO
     b"\x00\x00\x02\x00": "image/x-icon",  # CUR
+    b"#!AMR": "audio/amr",
+    b"#!SILK": "audio/silk",
+    b"OggS": "audio/ogg",
+    b"fLaC": "audio/flac",
+    b"\xff\xfb": "audio/mpeg",  # MP3
+    b"\xff\xf3": "audio/mpeg",  # MP3
+    b"\xff\xf2": "audio/mpeg",  # MP3
+    b"ID3": "audio/mpeg",       # MP3 with ID3 tag
 }
 
 # 扩展名到 MIME 类型映射
@@ -47,6 +55,14 @@ EXT_TO_MIME: dict[str, str] = {
     "svg": "image/svg+xml",
     "tiff": "image/tiff",
     "tif": "image/tiff",
+    # Audio
+    "mp3": "audio/mpeg",
+    "wav": "audio/wav",
+    "ogg": "audio/ogg",
+    "flac": "audio/flac",
+    "amr": "audio/amr",
+    "silk": "audio/silk",
+    "m4a": "audio/mp4",
 }
 
 
@@ -128,42 +144,6 @@ def detect_mime_from_extension(filename: str) -> str:
 
     ext = filename.rsplit(".", 1)[-1].lower()
     return EXT_TO_MIME.get(ext, "application/octet-stream")
-
-
-def make_data_url(data: bytes, mime_type: str | None = None) -> str:
-    """生成 data URL (用于 LLM 多模态输入)
-
-    Args:
-        data: 二进制数据
-        mime_type: MIME 类型，为 None 时自动检测
-
-    Returns:
-        data URL 格式字符串: data:<mime>;base64,<base64_data>
-
-    Example:
-        >>> data = b'\\x89PNG...'  # PNG 图片数据
-        >>> url = make_data_url(data)
-        >>> url.startswith('data:image/png;base64,')
-        True
-    """
-    if mime_type is None:
-        mime_type = detect_mime_type(data)
-
-    b64 = encode_base64(data)
-    return f"data:{mime_type};base64,{b64}"
-
-
-def make_data_url_from_base64(base64_data: str, mime_type: str) -> str:
-    """从已有的 base64 数据生成 data URL
-
-    Args:
-        base64_data: base64 编码的数据
-        mime_type: MIME 类型
-
-    Returns:
-        data URL 格式字符串
-    """
-    return f"data:{mime_type};base64,{base64_data}"
 
 
 def parse_data_url(data_url: str) -> tuple[bytes, str]:
@@ -248,7 +228,7 @@ def extract_gif_frame(
         output_data = output.getvalue()
 
         mime_type = f"image/{output_format.lower()}"
-        log.debug(f"🎞️ GIF 预处理: 提取第 {actual_index + 1}/{n_frames} 帧 → {output_format}")
+        log.debug(f"GIF 预处理: 提取第 {actual_index + 1}/{n_frames} 帧 -> {output_format}")
 
         return output_data, mime_type
 
@@ -355,112 +335,152 @@ async def download_and_encode(
     return b64, mime_type
 
 
-async def download_to_data_url(
+# ==================== 音频处理 ====================
+
+
+AUDIO_NATIVE_MODELS = ["gpt-4o", "gemini"]
+
+
+def model_supports_audio(model_name: str) -> bool:
+    """检查模型是否原生支持音频输入"""
+    name = model_name.lower()
+    return any(k in name for k in AUDIO_NATIVE_MODELS)
+
+
+def silk_to_wav(data: bytes, sample_rate: int = 24000) -> bytes | None:
+    """SILK 音频转 WAV，失败返回 None"""
+    try:
+        import pysilk
+    except ImportError:
+        log.warning("pysilk 未安装，无法转码 SILK")
+        return None
+    try:
+        return pysilk.decode(data, to_wav=True, sample_rate=sample_rate)
+    except Exception as e:
+        log.warning(f"SILK 转 WAV 失败: {e}")
+        return None
+
+
+def ffmpeg_to_wav(data: bytes) -> bytes | None:
+    """用 ffmpeg 将任意音频转 WAV，失败返回 None"""
+    import subprocess, tempfile, os
+    tmp_in = tmp_out = None
+    try:
+        tmp_in = tempfile.NamedTemporaryFile(suffix=".audio", delete=False)
+        tmp_in.write(data)
+        tmp_in.close()
+        tmp_out_path = tmp_in.name + ".wav"
+        result = subprocess.run(
+            ["ffmpeg", "-y", "-i", tmp_in.name, "-ar", "24000", "-ac", "1", "-f", "wav", tmp_out_path],
+            capture_output=True, timeout=15,
+        )
+        if result.returncode != 0:
+            log.warning(f"ffmpeg 转码失败: {result.stderr[:200]}")
+            return None
+        wav = open(tmp_out_path, "rb").read()
+        return wav
+    except FileNotFoundError:
+        log.warning("ffmpeg 未安装")
+        return None
+    except Exception as e:
+        log.warning(f"ffmpeg 转码异常: {e}")
+        return None
+    finally:
+        for p in [tmp_in and tmp_in.name, tmp_in and (tmp_in.name + ".wav")]:
+            if p and os.path.exists(p):
+                os.unlink(p)
+
+
+def audio_to_wav(data: bytes) -> bytes | None:
+    """任意音频转 WAV：SILK 头用 pysilk，其他用 ffmpeg"""
+    if data[:6] in (b"#!SILK", b"\x02#!SIL"):
+        wav = silk_to_wav(data)
+        if wav:
+            return wav
+    return ffmpeg_to_wav(data)
+
+
+async def download_audio(
     url: str,
     client: "httpx.AsyncClient | None" = None,
     timeout: float = 30.0,
-) -> str:
-    """下载图片并生成 data URL
-
-    Args:
-        url: 图片 URL
-        client: httpx 异步客户端
-        timeout: 下载超时时间（秒）
-
-    Returns:
-        data URL 格式字符串
-
-    Raises:
-        httpx.HTTPError: 下载失败时
-    """
-    data = await download_image(url, client, timeout)
-    return make_data_url(data)
-
-
-# ==================== 同步下载函数 (用于非异步场景) ====================
-
-
-def download_image_sync(
-    url: str,
-    timeout: float = 30.0,
-) -> bytes:
-    """同步下载图片
-
-    Args:
-        url: 图片 URL
-        timeout: 下载超时时间（秒）
-
-    Returns:
-        图片二进制数据
-
-    Raises:
-        httpx.HTTPError: 下载失败时
-    """
+) -> tuple[bytes, str]:
+    """下载音频文件，返回 (原始字节, mime_type)"""
     import httpx
 
-    with httpx.Client(timeout=timeout) as client:
-        resp = client.get(url)
+    if client is None:
+        async with httpx.AsyncClient(timeout=timeout) as temp_client:
+            resp = await temp_client.get(url)
+            resp.raise_for_status()
+            data = resp.content
+    else:
+        resp = await client.get(url, timeout=timeout)
         resp.raise_for_status()
-        return resp.content
+        data = resp.content
+
+    mime = detect_mime_type(data) or "audio/amr"
+    return data, mime
 
 
-def download_and_encode_sync(
-    url: str,
-    timeout: float = 30.0,
-) -> tuple[str, str]:
-    """同步下载图片并编码
+def read_local_audio(path: str) -> tuple[bytes, str]:
+    """读取本地音频文件，返回 (原始字节, mime_type)"""
+    from pathlib import Path
 
-    Args:
-        url: 图片 URL
-        timeout: 下载超时时间（秒）
+    p = Path(path)
+    if not p.exists():
+        raise FileNotFoundError(f"音频文件不存在: {path}")
 
-    Returns:
-        (base64_data, mime_type) 元组
+    data = p.read_bytes()
+    # 先用魔数检测，再用扩展名
+    mime = detect_mime_type(data)
+    if not mime or mime.startswith("image/"):
+        ext = p.suffix.lstrip(".").lower()
+        mime = EXT_TO_MIME.get(ext, "audio/amr")
+    return data, mime
+
+
+# ==================== 音频时长与切分 ====================
+
+
+def get_audio_duration(path: str) -> float | None:
+    """用 ffprobe 获取音频时长（秒），失败返回 None"""
+    import subprocess
+    try:
+        r = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "csv=p=0", path],
+            capture_output=True, text=True, timeout=10,
+        )
+        return float(r.stdout.strip()) if r.returncode == 0 else None
+    except Exception:
+        return None
+
+
+def split_audio(path: str, max_seconds: int = 55) -> list[str]:
+    """将音频按 max_seconds 切分，返回切片文件路径列表。
+
+    失败时返回 [原路径]（不切分，尝试直接发）。
     """
-    data = download_image_sync(url, timeout)
-    mime_type = detect_mime_type(data)
-    b64 = encode_base64(data)
-    return b64, mime_type
+    import subprocess
+    from pathlib import Path
 
+    p = Path(path)
+    out_dir = p.parent
+    stem, suffix = p.stem, p.suffix or ".mp3"
+    pattern = str(out_dir / f"{stem}_part%03d{suffix}")
 
-# ==================== 工具函数 ====================
+    try:
+        r = subprocess.run(
+            ["ffmpeg", "-y", "-i", path, "-f", "segment",
+             "-segment_time", str(max_seconds), "-c", "copy", pattern],
+            capture_output=True, timeout=120,
+        )
+        if r.returncode != 0:
+            log.warning(f"音频切分失败: {r.stderr[:200]}")
+            return [path]
+    except Exception as e:
+        log.warning(f"音频切分异常: {e}")
+        return [path]
 
-
-def is_image_url(url: str) -> bool:
-    """判断 URL 是否可能是图片
-
-    Args:
-        url: URL 字符串
-
-    Returns:
-        如果 URL 扩展名是图片格式则返回 True
-    """
-    url_lower = url.lower().split("?")[0]  # 去掉查询参数
-    return any(url_lower.endswith(f".{ext}") for ext in EXT_TO_MIME)
-
-
-def get_image_size_estimate(base64_data: str) -> int:
-    """估算 base64 图片的原始大小（字节）
-
-    Args:
-        base64_data: base64 编码的图片数据
-
-    Returns:
-        估算的原始字节数
-    """
-    # base64 编码后大小约为原始的 4/3
-    return int(len(base64_data) * 3 / 4)
-
-
-def is_base64_image_too_large(base64_data: str, max_size_mb: float = 10.0) -> bool:
-    """检查 base64 图片是否超过大小限制
-
-    Args:
-        base64_data: base64 编码的图片数据
-        max_size_mb: 最大允许的大小（MB）
-
-    Returns:
-        如果超过限制返回 True
-    """
-    size = get_image_size_estimate(base64_data)
-    return size > max_size_mb * 1024 * 1024
+    parts = sorted(out_dir.glob(f"{stem}_part*{suffix}"))
+    return [str(x) for x in parts] if parts else [path]
