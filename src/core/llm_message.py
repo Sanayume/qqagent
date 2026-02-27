@@ -134,6 +134,48 @@ def build_multimodal_message_from_urls(
     return HumanMessage(content=content)
 
 
+def _extract_text_from_message(message: BaseMessage, *, collapse_images: bool = False) -> str:
+    """核心文本提取逻辑
+
+    Args:
+        message: LangChain 消息对象
+        collapse_images: True 时将多张图片合并为 "[图片xN]"，False 时每张图片单独标记 "[图片]"
+    """
+    content = message.content
+
+    if isinstance(content, str):
+        return content
+
+    if isinstance(content, list):
+        text_parts = []
+        image_count = 0
+
+        for item in content:
+            if isinstance(item, str):
+                text_parts.append(item)
+            elif isinstance(item, dict):
+                item_type = item.get("type", "")
+                if item_type == "text":
+                    text_parts.append(item.get("text", ""))
+                elif item_type == "image_url":
+                    if collapse_images:
+                        image_count += 1
+                    else:
+                        text_parts.append("[图片]")
+
+        if collapse_images:
+            result_parts = []
+            if image_count > 0:
+                result_parts.append(f"[图片x{image_count}]")
+            if text_parts:
+                result_parts.append(" ".join(text_parts))
+            return " ".join(result_parts)
+
+        return " ".join(text_parts)
+
+    return str(content)
+
+
 def message_to_text(message: BaseMessage) -> str:
     """从消息中提取纯文本内容
 
@@ -158,27 +200,7 @@ def message_to_text(message: BaseMessage) -> str:
         >>> message_to_text(msg2)
         '看图 [图片]'
     """
-    content = message.content
-
-    # 字符串内容
-    if isinstance(content, str):
-        return content
-
-    # 多模态内容 (列表)
-    if isinstance(content, list):
-        parts = []
-        for item in content:
-            if isinstance(item, str):
-                parts.append(item)
-            elif isinstance(item, dict):
-                item_type = item.get("type", "")
-                if item_type == "text":
-                    parts.append(item.get("text", ""))
-                elif item_type == "image_url":
-                    parts.append("[图片]")
-        return " ".join(parts)
-
-    return str(content)
+    return _extract_text_from_message(message, collapse_images=False)
 
 
 def message_to_storage_text(message: BaseMessage) -> str:
@@ -193,34 +215,7 @@ def message_to_storage_text(message: BaseMessage) -> str:
     Returns:
         适合存储的文本格式
     """
-    content = message.content
-
-    if isinstance(content, str):
-        return content
-
-    if isinstance(content, list):
-        text_parts = []
-        image_count = 0
-
-        for item in content:
-            if isinstance(item, str):
-                text_parts.append(item)
-            elif isinstance(item, dict):
-                item_type = item.get("type", "")
-                if item_type == "text":
-                    text_parts.append(item.get("text", ""))
-                elif item_type == "image_url":
-                    image_count += 1
-
-        result_parts = []
-        if image_count > 0:
-            result_parts.append(f"[图片x{image_count}]")
-        if text_parts:
-            result_parts.append(" ".join(text_parts))
-
-        return " ".join(result_parts)
-
-    return str(content)
+    return _extract_text_from_message(message, collapse_images=True)
 
 
 def build_ai_message(text: str) -> AIMessage:
@@ -309,6 +304,80 @@ def strip_images_from_message(message: HumanMessage) -> HumanMessage:
 # ==================== 富上下文消息 ====================
 
 
+def _build_message_header(
+    sender_name: str, sender_qq: int, message_id: int,
+    reply_context: str | None, at_targets: list[str] | None,
+    timestamp: int | None,
+) -> str:
+    """构建消息头（发送者、时间、ID、回复、@）"""
+    from datetime import datetime
+
+    header = ""
+    if sender_name and sender_qq:
+        header = f"{sender_name}({sender_qq})"
+    elif sender_qq:
+        header = str(sender_qq)
+    elif sender_name:
+        header = sender_name
+
+    ts = timestamp if timestamp else int(datetime.now().timestamp())
+    dt = datetime.fromtimestamp(ts)
+    time_str = f"{dt.year}年{dt.month}月{dt.day}日{dt.hour}时{dt.minute}分"
+    header += f" {time_str}"
+
+    if message_id:
+        header += f" #{message_id}"
+
+    if reply_context:
+        if ": " in reply_context:
+            reply_sender = reply_context.split(": ")[0]
+            header += f" 回复{reply_sender}"
+        else:
+            header += " 回复"
+
+    if at_targets:
+        at_list = " ".join(f"@{t}" for t in at_targets)
+        header += f" {at_list}"
+
+    header += ":"
+    return header
+
+
+def _build_message_body(
+    main_text: str, reply_context: str | None,
+    file_descriptions: list[str] | None, forward_summary: str | None,
+    image_paths: list[str] | None,
+) -> list[str]:
+    """构建消息体（引用、正文、文件、转发、图片路径）"""
+    parts = []
+
+    if reply_context:
+        if ": " in reply_context:
+            reply_content = reply_context.split(": ", 1)[1]
+        else:
+            reply_content = reply_context
+        if len(reply_content) > 80:
+            reply_content = reply_content[:80] + "..."
+        parts.append(f"> {reply_content}")
+
+    if main_text:
+        parts.append(main_text)
+    elif image_paths:
+        parts.append(f"[图片x{len(image_paths)}]")
+
+    if file_descriptions:
+        parts.append("\n".join(file_descriptions))
+
+    if forward_summary:
+        parts.append(f"[转发消息]\n{forward_summary}")
+
+    if image_paths:
+        parts.append("[图片路径]")
+        parts.append("\n".join(image_paths))
+
+    return parts
+
+
 def build_rich_context_message(
     main_text: str,
     sender_name: str = "",
@@ -354,74 +423,16 @@ def build_rich_context_message(
     Returns:
         格式化的完整消息文本
     """
-    from datetime import datetime
+    header = _build_message_header(
+        sender_name, sender_qq, message_id,
+        reply_context, at_targets, timestamp,
+    )
+    body_parts = _build_message_body(
+        main_text, reply_context, file_descriptions,
+        forward_summary, image_paths,
+    )
 
-    parts = []
-
-    # === 头部行: 发送者(QQ) 时间 #消息ID 回复XXX @YYY: ===
-    header = ""
-    if sender_name and sender_qq:
-        header = f"{sender_name}({sender_qq})"
-    elif sender_qq:
-        header = str(sender_qq)
-    elif sender_name:
-        header = sender_name
-
-    # 时间
-    ts = timestamp if timestamp else int(datetime.now().timestamp())
-    dt = datetime.fromtimestamp(ts)
-    time_str = f"{dt.year}年{dt.month}月{dt.day}日{dt.hour}时{dt.minute}分"
-    header += f" {time_str}"
-
-    if message_id:
-        header += f" #{message_id}"
-
-    # 回复关系
-    if reply_context:
-        if ": " in reply_context:
-            reply_sender = reply_context.split(": ")[0]
-            header += f" 回复{reply_sender}"
-        else:
-            header += " 回复"
-
-    # @ 目标
-    if at_targets:
-        at_list = " ".join(f"@{t}" for t in at_targets)
-        header += f" {at_list}"
-
-    header += ":"
-    parts.append(header)
-
-    # === 引用内容（缩进显示） ===
-    if reply_context:
-        if ": " in reply_context:
-            reply_content = reply_context.split(": ", 1)[1]
-        else:
-            reply_content = reply_context
-        if len(reply_content) > 80:
-            reply_content = reply_content[:80] + "..."
-        parts.append(f"> {reply_content}")
-
-    # === 消息正文 ===
-    if main_text:
-        parts.append(main_text)
-    elif image_paths:
-        parts.append(f"[图片x{len(image_paths)}]")
-
-    # === 文件附件 ===
-    if file_descriptions:
-        parts.append("\n".join(file_descriptions))
-
-    # === 转发摘要 ===
-    if forward_summary:
-        parts.append(f"[转发消息]\n{forward_summary}")
-
-    # === 图片路径（供工具使用） ===
-    if image_paths:
-        parts.append("[图片路径]")
-        parts.append("\n".join(image_paths))
-
-    # === 包装：私聊/群聊标识 ===
+    parts = [header] + body_parts
     body = "\n".join(parts)
     if group_id:
         return f"[群{group_id} 聊天记录]\n\n{body}"

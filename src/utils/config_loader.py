@@ -56,6 +56,35 @@ class DynamicConfig:
         "secret_key": "change-me-to-a-random-string",
     })
 
+    # 运维调优参数
+    tuning: Dict[str, Any] = field(default_factory=lambda: {
+        # Agent
+        "max_agent_loops": 15,
+        # 熔断器
+        "llm_failure_threshold": 5,
+        "llm_recovery_timeout": 60.0,
+        "onebot_failure_threshold": 10,
+        "onebot_recovery_timeout": 30.0,
+        "media_failure_threshold": 8,
+        "media_recovery_timeout": 30.0,
+        # 网络
+        "download_timeout": 30.0,
+        "api_timeout": 30,
+        "ws_max_message_size_mb": 200,
+        # 音频
+        "audio_max_duration_seconds": 55,
+        # 知识库搜索
+        "knowledge_vector_search_limit": 200,
+        "knowledge_cosine_threshold": 0.3,
+        "knowledge_bm25_weight": 0.4,
+        "knowledge_vector_weight": 0.6,
+        # OpenClaw sub-agent
+        "openclaw_timeout": 120,
+        "openclaw_model": "default",
+        "openclaw_stream_chunk_timeout": 30,
+        "openclaw_system_prompt": "",
+    })
+
 
 class ConfigFileHandler(FileSystemEventHandler):
     """监听配置文件变化"""
@@ -101,7 +130,8 @@ class ConfigLoader:
             self.config.presets = data.get("presets", self.config.presets)
             self.config.plugins = data.get("plugins", self.config.plugins)
             self.config.admin = data.get("admin", self.config.admin)
-            
+            self.config.tuning = {**DynamicConfig().tuning, **data.get("tuning", {})}
+
             log.success(f"Config loaded from {self.config_path}")
             
             # 触发回调
@@ -164,3 +194,19 @@ def get_config_loader() -> ConfigLoader:
     if _loader is None:
         _loader = ConfigLoader()
     return _loader
+
+
+def reset_config_loader():
+    """重置全局 ConfigLoader 单例（用于测试）"""
+    global _loader
+    if _loader is not None:
+        _loader.stop()
+    _loader = None
+
+
+def get_tuning(key: str, default=None):
+    """从 tuning 配置中读取值，config_loader 未初始化时返回 default"""
+    global _loader
+    if _loader is None:
+        return default
+    return _loader.config.tuning.get(key, default)

@@ -359,6 +359,12 @@ def get_tool_registry() -> ToolRegistry:
     return _registry
 
 
+def reset_tool_registry():
+    """重置全局工具注册表单例（用于测试）"""
+    global _registry
+    _registry = None
+
+
 def init_builtin_tools() -> ToolRegistry:
     """初始化内置工具
 

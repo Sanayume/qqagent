@@ -16,7 +16,7 @@ venv/
 htmlcov/
 dist/
 build/
-
+openclaw/
 # Node.js
 node_modules/
 package.json
@@ -30,7 +30,6 @@ data/*.db
 *.sqlite3
 
 # Project Specific
-mcpserver/
 workspace/*
 tmp*/
 tmpclaude*
@@ -62,7 +61,8 @@ gcli2api/
 gcli2api*
 install_log.txt
 read_log.py
-
+openclaw/*
+openclaw*
 # IDE
 .vscode/
 .idea/
@@ -71,3 +71,4 @@ read_log.py
 # Pytest
 .pytest_cache/
 openclaw/
+_*

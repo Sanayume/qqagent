@@ -32,11 +32,39 @@ presets:
 plugins:
   weather: true
 
+# 运维调优参数（所有值均有内置默认值，按需覆盖即可）
+tuning:
+  # Agent
+  max_agent_loops: 15              # Agent 最大循环次数
+  # 熔断器
+  llm_failure_threshold: 5         # LLM 连续失败多少次触发熔断
+  llm_recovery_timeout: 60.0       # LLM 熔断冷却时间（秒）
+  onebot_failure_threshold: 10     # OneBot 连续失败多少次触发熔断
+  onebot_recovery_timeout: 30.0    # OneBot 熔断冷却时间（秒）
+  media_failure_threshold: 8       # 媒体下载连续失败多少次触发熔断
+  media_recovery_timeout: 30.0     # 媒体下载熔断冷却时间（秒）
+  # 网络
+  download_timeout: 30.0           # 资源下载超时（秒）
+  api_timeout: 30                  # OneBot API 调用超时（秒）
+  ws_max_message_size_mb: 200      # WebSocket 最大消息大小（MB）
+  # 音频
+  audio_max_duration_seconds: 55   # 语音自动切分阈值（秒）
+  # 知识库搜索
+  knowledge_vector_search_limit: 200   # 向量搜索最大条数
+  knowledge_cosine_threshold: 0.3      # 余弦相似度阈值
+  knowledge_bm25_weight: 0.4           # BM25 权重
+  knowledge_vector_weight: 0.6         # 向量权重
+  # OpenClaw sub-agent
+  openclaw_timeout: 120                # 总超时（秒）
+  openclaw_model: default              # OpenClaw 模型名
+  openclaw_stream_chunk_timeout: 30    # 流式无数据超时（秒）
+  # openclaw_system_prompt: ""         # 自定义 SubAgent 系统提示词（留空用内置默认值）
+
 # 多模型 Fallback 配置（需要 2 个以上模型才会启用）
 # 按优先级排列，主模型失败时自动切换备用模型
 llm:
   models:
+    - model: gpt-5.1
     - model: gemini-3-flash-preview
-    - model: claude-sonnet-4-6
-      api_key: "sk-WhXRtQ6llImK1NPP0KwXWZpbfDAjJzFkp2ZGawcf3MX9NhG6"
-      base_url: "https://yunwu.ai/v1"
+      api_key: "key"
+      base_url: "url"

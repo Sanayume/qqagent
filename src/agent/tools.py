@@ -7,7 +7,12 @@
 import contextvars
 from typing import Any, Callable
 from langchain_core.tools import tool
+from src.utils.logger import log
 
+# ==================== 常量 ====================
+MAX_DELAY_MINUTES = 1440
+TEXT_PREVIEW_LENGTH = 50
+MAX_RENDER_TEXT_LENGTH = 50000
 
 # ==================== 实时消息回调 ====================
 
@@ -35,6 +40,75 @@ def get_send_message_callback() -> Callable[[dict], None] | None:
 
 
 # ==================== 工具定义 ====================
+
+
+def _parse_at_users(at_users: Any) -> list[int]:
+    """解析 @用户参数，兼容多种输入格式"""
+    at_list = []
+    if not at_users:
+        return at_list
+    if isinstance(at_users, int):
+        at_list.append(at_users)
+    elif isinstance(at_users, list):
+        for item in at_users:
+            if isinstance(item, int):
+                at_list.append(item)
+            elif isinstance(item, str) and item.strip().isdigit():
+                at_list.append(int(item.strip()))
+    elif isinstance(at_users, str):
+        for qq in at_users.split(","):
+            qq = qq.strip()
+            if qq.isdigit():
+                at_list.append(int(qq))
+    return at_list
+
+
+def _build_send_command(text: str, image: str, record: str, at_list: list[int], reply_to: int, delay_minutes: int) -> dict:
+    """构建发送指令 dict"""
+    return {
+        "_type": "send_message_command",
+        "text": text,
+        "image": image,
+        "record": record,
+        "at_users": at_list,
+        "reply_to": reply_to,
+        "delay_minutes": delay_minutes,
+    }
+
+
+def _format_send_confirmation(command: dict) -> str:
+    """格式化返回给 LLM 的确认文本"""
+    text = command["text"]
+    image = command["image"]
+    record = command["record"]
+    at_list = command["at_users"]
+    reply_to = command["reply_to"]
+    delay_minutes = command["delay_minutes"]
+
+    parts = []
+    if text:
+        parts.append(f"文本: {text[:TEXT_PREVIEW_LENGTH]}{'...' if len(text) > TEXT_PREVIEW_LENGTH else ''}")
+    if image:
+        parts.append(f"图片: {image[:30]}...")
+    if record:
+        parts.append(f"语音: {record[:30]}...")
+    if at_list:
+        parts.append(f"@: {at_list}")
+    if reply_to:
+        parts.append(f"回复: {reply_to}")
+
+    summary = ', '.join(parts) or '空消息'
+
+    if delay_minutes > 0:
+        if delay_minutes >= 60:
+            hours = delay_minutes // 60
+            mins = delay_minutes % 60
+            time_desc = f"{hours}小时{mins}分钟" if mins else f"{hours}小时"
+        else:
+            time_desc = f"{delay_minutes}分钟"
+        return f"✓ 已安排定时发送，将在 {time_desc} 后发送。({summary}) 【任务完成，请结束对话】"
+
+    return f"✓ 消息发送成功！({summary}) 【任务完成，请结束对话】"
 
 
 @tool
@@ -76,80 +150,28 @@ def send_message(
     Returns:
         发送状态确认（看到确认后请结束对话，不要继续调用工具）
     """
-    import json
-
-    # 解析 at_users - 兼容多种输入格式
-    at_list = []
-    if at_users:
-        # 如果是整数，直接添加
-        if isinstance(at_users, int):
-            at_list.append(at_users)
-        # 如果是列表，遍历添加
-        elif isinstance(at_users, list):
-            for item in at_users:
-                if isinstance(item, int):
-                    at_list.append(item)
-                elif isinstance(item, str) and item.strip().isdigit():
-                    at_list.append(int(item.strip()))
-        # 如果是字符串，按逗号分隔
-        elif isinstance(at_users, str):
-            for qq in at_users.split(","):
-                qq = qq.strip()
-                if qq.isdigit():
-                    at_list.append(int(qq))
+    at_list = _parse_at_users(at_users)
 
     # 校验 delay_minutes
     try:
         delay_minutes = max(0, int(delay_minutes))
     except (ValueError, TypeError):
         delay_minutes = 0
-    if delay_minutes > 1440:
-        return "错误: delay_minutes 不能超过 1440（24小时）"
+    if delay_minutes > MAX_DELAY_MINUTES:
+        return f"错误: delay_minutes 不能超过 {MAX_DELAY_MINUTES}（24小时）"
 
-    # 构建发送指令
-    command = {
-        "_type": "send_message_command",
-        "text": text,
-        "image": image,
-        "record": record,
-        "at_users": at_list,
-        "reply_to": reply_to,
-        "delay_minutes": delay_minutes,
-    }
+    command = _build_send_command(text, image, record, at_list, reply_to, delay_minutes)
 
     # 如果设置了实时回调，立即发送消息（或安排延迟发送）
     callback = get_send_message_callback()
     if callback is not None:
         try:
             callback(command)
-        except Exception:
+        except Exception as e:
             # 回调失败不影响工具返回
-            pass
+            log.debug(f"send_message callback failed: {e}")
 
-    # 返回确认信息，明确告知消息已发送，LLM 应停止
-    parts = []
-    if text:
-        parts.append(f"文本: {text[:50]}{'...' if len(text) > 50 else ''}")
-    if image:
-        parts.append(f"图片: {image[:30]}...")
-    if record:
-        parts.append(f"语音: {record[:30]}...")
-    if at_list:
-        parts.append(f"@: {at_list}")
-    if reply_to:
-        parts.append(f"回复: {reply_to}")
-
-    # 区分立即发送和定时发送的返回消息
-    if delay_minutes > 0:
-        if delay_minutes >= 60:
-            hours = delay_minutes // 60
-            mins = delay_minutes % 60
-            time_desc = f"{hours}小时{mins}分钟" if mins else f"{hours}小时"
-        else:
-            time_desc = f"{delay_minutes}分钟"
-        return f"✓ 已安排定时发送，将在 {time_desc} 后发送。({', '.join(parts) or '空消息'}) 【任务完成，请结束对话】"
-
-    return f"✓ 消息发送成功！({', '.join(parts) or '空消息'}) 【任务完成，请结束对话】"
+    return _format_send_confirmation(command)
 
 
 # ==================== 文件下载回调 ====================
@@ -345,8 +367,8 @@ def render_text(text: str, width: int = 800) -> str:
     if not text or not text.strip():
         return "错误: 文本内容不能为空"
 
-    if len(text) > 50000:
-        return f"错误: 文本过长 ({len(text)} > 50000 字符)"
+    if len(text) > MAX_RENDER_TEXT_LENGTH:
+        return f"错误: 文本过长 ({len(text)} > {MAX_RENDER_TEXT_LENGTH} 字符)"
 
     result = do_render(text, width=width)
     return result.to_tool_response()

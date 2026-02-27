@@ -35,6 +35,13 @@ from src.core.exceptions import (
     TimeoutError as AgentTimeoutError,
 )
 from src.core.media import download_and_encode
+from src.utils.config_loader import get_tuning
+
+# ==================== 常量（默认值，可通过 config.yaml tuning 覆盖） ====================
+MAX_WS_MESSAGE_SIZE = 200 * 1024 * 1024
+DEFAULT_API_TIMEOUT = 30
+MAX_AT_USERS = 5
+AUDIO_MAX_DURATION_SECONDS = 55
 
 
 @dataclass
@@ -298,10 +305,11 @@ class OneBotAdapter:
         while self._running:
             try:
                 log_connection_status("connecting", f"NapCat ({self.ws_url})")
+                ws_max_size = get_tuning("ws_max_message_size_mb", 200) * 1024 * 1024
                 async with ws_connect(
                     self.ws_url,
                     extra_headers=headers,
-                    max_size=200 * 1024 * 1024,  # 200MB，支持大文件传输
+                    max_size=ws_max_size,
                 ) as ws:
                     self._ws_forward = ws
                     attempt = 0  # 连接成功，重置计数
@@ -398,11 +406,12 @@ class OneBotAdapter:
         
         log.info(f"Starting reverse WS server at ws://{self.reverse_host}:{self.reverse_port}{self.reverse_path}")
         
+        ws_max_size = get_tuning("ws_max_message_size_mb", 200) * 1024 * 1024
         self._server = await ws_serve(
             handle_client,
             self.reverse_host,
             self.reverse_port,
-            max_size=200 * 1024 * 1024,  # 200MB，支持大文件传输
+            max_size=ws_max_size,
         )
         
         log.success(f"Reverse WS server listening on {self.reverse_host}:{self.reverse_port}")
@@ -463,8 +472,10 @@ class OneBotAdapter:
         """获取活跃的 WebSocket 连接"""
         return self._ws_reverse or self._ws_forward
     
-    async def call_api(self, action: str, params: dict | None = None, timeout: float = 30) -> dict:
+    async def call_api(self, action: str, params: dict | None = None, timeout: float | None = None) -> dict:
         """调用 OneBot API"""
+        if timeout is None:
+            timeout = get_tuning("api_timeout", DEFAULT_API_TIMEOUT)
         ws = self._get_active_ws()
         if not ws:
             raise ConnectionError("No active WebSocket connection")
@@ -551,7 +562,7 @@ class OneBotAdapter:
 
         # 2. @ 用户
         if at_users:
-            for qq in at_users[:5]:  # 最多 @ 5 人
+            for qq in at_users[:MAX_AT_USERS]:  # 最多 @ 5 人
                 segments.append({"type": "at", "data": {"qq": str(qq)}})
 
         # 3. 文本
@@ -613,10 +624,11 @@ class OneBotAdapter:
 
         file_uri = f"file:///{p}"
 
+        max_audio_sec = get_tuning("audio_max_duration_seconds", AUDIO_MAX_DURATION_SECONDS)
         duration = get_audio_duration(str(p))
-        if duration is not None and duration > 55:
-            log.info(f"语音时长 {duration:.1f}s > 55s，自动切分")
-            parts = split_audio(str(p), max_seconds=55)
+        if duration is not None and duration > max_audio_sec:
+            log.info(f"语音时长 {duration:.1f}s > {max_audio_sec}s，自动切分")
+            parts = split_audio(str(p), max_seconds=max_audio_sec)
             for part in parts:
                 await self.send_msg(event, [{"type": "record", "data": {"file": f"file:///{Path(part).resolve()}"}}])
         else:

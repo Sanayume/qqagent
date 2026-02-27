@@ -20,6 +20,15 @@ from src.utils.logger import log
 
 T = TypeVar("T")
 
+# ==================== 常量 ====================
+LLM_FAILURE_THRESHOLD = 5
+LLM_RECOVERY_TIMEOUT = 60.0
+ONEBOT_FAILURE_THRESHOLD = 10
+ONEBOT_RECOVERY_TIMEOUT = 30.0
+MEDIA_FAILURE_THRESHOLD = 8
+MEDIA_RECOVERY_TIMEOUT = 30.0
+JITTER_RANGE = 0.5
+JITTER_OFFSET = 0.75
 
 # ==================== 退避策略 ====================
 
@@ -45,7 +54,7 @@ class BackoffStrategy:
 
         if self.jitter:
             # 添加 ±25% 的随机抖动，避免惊群效应
-            delay = delay * (0.75 + random.random() * 0.5)
+            delay = delay * (JITTER_OFFSET + random.random() * JITTER_RANGE)
 
         return delay
 
@@ -258,23 +267,68 @@ class CircuitOpenError(AgentError):
 
 # ==================== 预置熔断器实例 ====================
 
-# LLM API 熔断器
-llm_circuit = CircuitBreaker(
-    name="LLM_API",
-    failure_threshold=5,
-    recovery_timeout=60.0,
-)
+_llm_circuit = None
+_onebot_circuit = None
+_media_circuit = None
 
-# OneBot 连接熔断器
-onebot_circuit = CircuitBreaker(
-    name="OneBot",
-    failure_threshold=10,
-    recovery_timeout=30.0,
-)
 
-# 媒体下载熔断器
-media_circuit = CircuitBreaker(
-    name="Media",
-    failure_threshold=8,
-    recovery_timeout=30.0,
-)
+def create_llm_circuit(
+    failure_threshold: int = LLM_FAILURE_THRESHOLD,
+    recovery_timeout: float = LLM_RECOVERY_TIMEOUT,
+) -> CircuitBreaker:
+    """创建 LLM 熔断器实例（用于测试或自定义配置）"""
+    return CircuitBreaker(
+        name="LLM_API",
+        failure_threshold=failure_threshold,
+        recovery_timeout=recovery_timeout,
+    )
+
+
+def get_llm_circuit() -> CircuitBreaker:
+    """获取 LLM 熔断器（首次调用时从配置初始化）"""
+    global _llm_circuit
+    if _llm_circuit is None:
+        from src.utils.config_loader import get_tuning
+        _llm_circuit = CircuitBreaker(
+            name="LLM_API",
+            failure_threshold=get_tuning("llm_failure_threshold", LLM_FAILURE_THRESHOLD),
+            recovery_timeout=get_tuning("llm_recovery_timeout", LLM_RECOVERY_TIMEOUT),
+        )
+    return _llm_circuit
+
+
+def get_onebot_circuit() -> CircuitBreaker:
+    """获取 OneBot 熔断器（首次调用时从配置初始化）"""
+    global _onebot_circuit
+    if _onebot_circuit is None:
+        from src.utils.config_loader import get_tuning
+        _onebot_circuit = CircuitBreaker(
+            name="OneBot",
+            failure_threshold=get_tuning("onebot_failure_threshold", ONEBOT_FAILURE_THRESHOLD),
+            recovery_timeout=get_tuning("onebot_recovery_timeout", ONEBOT_RECOVERY_TIMEOUT),
+        )
+    return _onebot_circuit
+
+
+def get_media_circuit() -> CircuitBreaker:
+    """获取媒体下载熔断器（首次调用时从配置初始化）"""
+    global _media_circuit
+    if _media_circuit is None:
+        from src.utils.config_loader import get_tuning
+        _media_circuit = CircuitBreaker(
+            name="Media",
+            failure_threshold=get_tuning("media_failure_threshold", MEDIA_FAILURE_THRESHOLD),
+            recovery_timeout=get_tuning("media_recovery_timeout", MEDIA_RECOVERY_TIMEOUT),
+        )
+    return _media_circuit
+
+
+# 向后兼容：模块级属性访问自动走 lazy init
+def __getattr__(name: str):
+    if name == "llm_circuit":
+        return get_llm_circuit()
+    if name == "onebot_circuit":
+        return get_onebot_circuit()
+    if name == "media_circuit":
+        return get_media_circuit()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

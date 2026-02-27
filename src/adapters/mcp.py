@@ -51,6 +51,7 @@ class MCPManager:
         self.timeout = timeout
         self.retry_count = retry_count
         self._client = None
+        self._clients: list = []  # 保持所有 MCP client 引用，防止 GC 回收
         self._tools: list = []
         self._started = False
         self._server_status: dict[str, MCPServerStatus] = {}
@@ -219,13 +220,16 @@ class MCPManager:
                 # 单独为这个服务器创建客户端
                 single_config = {server_name: server_config}
                 client = MultiServerMCPClient(single_config)
-                
+
                 # 设置超时获取工具
                 tools = await asyncio.wait_for(
                     client.get_tools(),
                     timeout=min(self.timeout / len(converted_config), 30)  # 每个服务器最多 30 秒
                 )
-                
+
+                # 保持 client 引用，防止 GC 回收导致 stdio 管道断开
+                self._clients.append(client)
+
                 # 成功
                 self._server_status[server_name].status = "success"
                 self._server_status[server_name].tools = [t.name for t in tools]

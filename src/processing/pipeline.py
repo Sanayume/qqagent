@@ -163,15 +163,15 @@ class MessagePipeline:
                 info = await self.adapter.get_group_member_info(event.group_id, event.user_id)
                 if info.get("status") == "ok":
                     sender = info.get("data", {}).get("nickname", sender)
-            except Exception:
-                pass
+            except Exception as e:
+                log.debug(f"Failed to get group member info: {e}")
         else:
             try:
                 info = await self.adapter.get_stranger_info(event.user_id)
                 if info.get("status") == "ok":
                     sender = info.get("data", {}).get("nickname", sender)
-            except Exception:
-                pass
+            except Exception as e:
+                log.debug(f"Failed to get stranger info: {e}")
 
         log.info(f"[{chat_type} {event.group_id or event.user_id}] {sender} 上传文件: {file_name}")
         size_str = format_file_size(file_size)
@@ -211,9 +211,8 @@ class MessagePipeline:
             )
             await self._invoke_agent(event, session_id, llm_message)
 
-    async def _invoke_agent(self, event: OneBotEvent, session_id: str, llm_message):
-        """调用 Agent 并处理响应"""
-        loop = asyncio.get_running_loop()
+    def _setup_callbacks(self, event: OneBotEvent, loop):
+        """创建并注册实时发送和文件下载回调"""
 
         def realtime_callback(cmd: dict):
             delay_minutes = cmd.get("delay_minutes", 0)
@@ -263,6 +262,39 @@ class MessagePipeline:
         set_send_message_callback(realtime_callback)
         set_download_file_callback(download_file_callback)
 
+    async def _handle_agent_error(self, event: OneBotEvent, error: Exception):
+        """统一处理 Agent 调用中的异常"""
+        if isinstance(error, RateLimitError):
+            log_error(error, context="调用 LLM")
+            await self.adapter.send_rich_msg(event, text="请求太频繁了，请稍后再试~")
+        elif isinstance(error, AuthError):
+            log_error(error, context="调用 LLM")
+            await self.adapter.send_rich_msg(event, text="AI 服务认证失败，请联系管理员检查配置")
+        elif isinstance(error, CircuitOpenError):
+            log.warning(f"熔断器开启: {error.name}")
+            await self.adapter.send_rich_msg(event, text="服务暂时不可用，请稍后再试~")
+        elif isinstance(error, NetworkError):
+            log_error(error, context="处理消息")
+            await self.adapter.send_rich_msg(event, text="网络连接异常，请稍后重试~")
+        elif isinstance(error, APIError):
+            log_error(error, context="调用 API")
+            await self.adapter.send_rich_msg(event, text=f"服务异常: {error.user_hint or '请稍后重试'}")
+        elif isinstance(error, OneBotError):
+            log_error(error, context="发送消息")
+        else:
+            log_error(error, context="处理消息", show_traceback=True)
+            self.ctx.stats.record_error()
+            if not self.settings.agent.silent_errors:
+                try:
+                    await self.adapter.send_rich_msg(event, text="处理消息时出错了，请稍后重试")
+                except Exception as e:
+                    log.debug(f"Failed to send error message to user: {e}")
+
+    async def _invoke_agent(self, event: OneBotEvent, session_id: str, llm_message):
+        """调用 Agent 并处理响应"""
+        loop = asyncio.get_running_loop()
+        self._setup_callbacks(event, loop)
+
         try:
             await self.agent.chat(
                 message=llm_message,
@@ -274,41 +306,12 @@ class MessagePipeline:
             log.info("Agent 处理完成")
             self.ctx.stats.record_message()
 
-        except RateLimitError as e:
-            log_error(e, context="调用 LLM")
-            await self.adapter.send_rich_msg(event, text="请求太频繁了，请稍后再试~")
-
-        except AuthError as e:
-            log_error(e, context="调用 LLM")
-            await self.adapter.send_rich_msg(event, text="AI 服务认证失败，请联系管理员检查配置")
-
-        except CircuitOpenError as e:
-            log.warning(f"熔断器开启: {e.name}")
-            await self.adapter.send_rich_msg(event, text="服务暂时不可用，请稍后再试~")
-
-        except NetworkError as e:
-            log_error(e, context="处理消息")
-            await self.adapter.send_rich_msg(event, text="网络连接异常，请稍后重试~")
-
-        except APIError as e:
-            log_error(e, context="调用 API")
-            await self.adapter.send_rich_msg(event, text=f"服务异常: {e.user_hint or '请稍后重试'}")
-
-        except OneBotError as e:
-            log_error(e, context="发送消息")
-
         except asyncio.CancelledError:
             log.info("消息处理被取消")
             raise
 
         except Exception as e:
-            log_error(e, context="处理消息", show_traceback=True)
-            self.ctx.stats.record_error()
-            if not self.settings.agent.silent_errors:
-                try:
-                    await self.adapter.send_rich_msg(event, text="处理消息时出错了，请稍后重试")
-                except Exception:
-                    pass
+            await self._handle_agent_error(event, e)
 
         finally:
             set_send_message_callback(None)

@@ -57,12 +57,30 @@ class BotApp:
 
     async def start(self):
         """初始化所有组件并启动"""
-        # 加载配置
         env_loader = get_env_loader()
+        self._init_config()
+        self._init_storage()
+        all_tools = await self._init_tools()
+        self._init_agent(all_tools)
+        env_loader.add_callback(self.on_env_reload)
+        self._init_adapter()
+        self._init_audio_and_context()
+        self._init_aggregators()
+        self._init_event_handlers()
+        await self._start_admin()
+        self._log_startup_banner()
+
+        try:
+            await self.adapter.start()
+        except KeyboardInterrupt:
+            log.info("Interrupted by user")
+        finally:
+            await self.stop()
+
+    def _init_config(self):
+        """加载配置和日志"""
         self.settings = load_settings()
         self.config_loader = get_config_loader()
-
-        # 设置日志
         setup_logger(level=self.settings.log_level)
 
         log.info("=" * 60)
@@ -73,31 +91,28 @@ class BotApp:
         log.info(f"LLM Model: {self.settings.llm.default_model}")
         log.info(f"LangSmith: {'Enabled' if self.settings.langchain_tracing_v2 else 'Disabled'}")
 
-        # 设置 LangSmith 环境变量
         if self.settings.langchain_api_key:
             os.environ["LANGCHAIN_API_KEY"] = self.settings.langchain_api_key
             os.environ["LANGCHAIN_PROJECT"] = self.settings.langchain_project
             os.environ["LANGCHAIN_TRACING_V2"] = "true" if self.settings.langchain_tracing_v2 else "false"
             log.info(f"LangSmith Project: {self.settings.langchain_project}")
 
-        # 创建 MemoryStore
+    def _init_storage(self):
+        """初始化存储和预设"""
         self.memory_store = MemoryStore(db_path="data/sessions.db", max_messages=self.settings.agent.max_history_messages)
         log.success(f"MemoryStore initialized: {self.memory_store.get_session_count()} existing sessions")
 
-        # 创建 PresetManager
         self.preset_manager = PresetManager(
             config_loader=self.config_loader,
             preset_dir="config/presets",
         )
-        preset_name = self.settings.agent.default_preset
-        default_preset = self.preset_manager.get(preset_name) or self.preset_manager.get_default()
-        log.info(f"Default preset: {default_preset.name}")
+        self.knowledge_store = KnowledgeStore(db_path="data/knowledge.db")
 
-        # 启动 MCP 服务器
+    async def _init_tools(self) -> list:
+        """启动 MCP 并初始化工具注册表，返回启用的工具列表"""
         self.mcp_manager = MCPManager("config/mcp_servers.json", timeout=120.0, retry_count=2)
         await self.mcp_manager.start()
 
-        # 初始化工具注册表
         init_builtin_tools()
         registry = get_tool_registry()
         for server_name, status in self.mcp_manager.servers.items():
@@ -108,28 +123,35 @@ class BotApp:
         all_tools = registry.get_enabled_tools()
         tool_status = registry.get_status()
         log.info(f"Total tools: {tool_status['total']} (enabled: {tool_status['enabled']}, disabled: {tool_status['disabled']})")
+        return all_tools
 
-        # 创建 KnowledgeStore
-        self.knowledge_store = KnowledgeStore(db_path="data/knowledge.db")
-
-        # 构建 FallbackLLM（如果 config.yaml 中配置了 llm.models）
-        fallback_llm = None
+    def _create_fallback_llm(self, api_key: str = "", base_url: str = "") -> FallbackLLM | None:
+        """从 config.yaml 构建 FallbackLLM，不满足条件时返回 None"""
         import yaml as _yaml
+        api_key = api_key or self.settings.llm.openai_api_key
+        base_url = base_url or self.settings.llm.openai_api_base
         try:
             with open("config.yaml", "r", encoding="utf-8") as _f:
                 _raw = _yaml.safe_load(_f) or {}
             model_list = (_raw.get("llm") or {}).get("models", [])
             if len(model_list) >= 2:
                 for cfg in model_list:
-                    cfg.setdefault("api_key", self.settings.llm.openai_api_key)
-                    cfg.setdefault("base_url", self.settings.llm.openai_api_base)
+                    cfg.setdefault("api_key", api_key)
+                    cfg.setdefault("base_url", base_url)
                     cfg.setdefault("model", self.settings.llm.default_model)
-                fallback_llm = FallbackLLM(model_list)
                 log.info(f"FallbackLLM enabled with {len(model_list)} models")
+                return FallbackLLM(model_list)
         except Exception as e:
             log.debug(f"FallbackLLM not configured: {e}")
+        return None
 
-        # 创建 Agent
+    def _init_agent(self, all_tools: list):
+        """创建 Agent"""
+        preset_name = self.settings.agent.default_preset
+        default_preset = self.preset_manager.get(preset_name) or self.preset_manager.get_default()
+        log.info(f"Default preset: {default_preset.name}")
+
+        fallback_llm = self._create_fallback_llm()
         self.agent = QQAgent(
             model=self.settings.llm.default_model,
             api_key=self.settings.llm.openai_api_key,
@@ -142,10 +164,8 @@ class BotApp:
         )
         log.success("Agent created successfully")
 
-        # 注册 .env 热重载回调
-        env_loader.add_callback(self.on_env_reload)
-
-        # 创建 OneBot 适配器
+    def _init_adapter(self):
+        """创建 OneBot 适配器和会话管理器"""
         self.adapter = OneBotAdapter(
             ws_url=self.settings.onebot.ws_url,
             reverse_host=self.settings.onebot.reverse_ws_host,
@@ -154,36 +174,32 @@ class BotApp:
             token=self.settings.onebot.token,
             mode=self.settings.onebot.mode,
         )
-
-        # 初始化会话管理器
         from src.session.manager import SessionManager
         self.adapter.session_manager = SessionManager(use_loader=True)
 
-        # 触发配置
         self.bot_names = self.settings.agent.bot_names
         self.allow_at = self.settings.agent.allow_at_reply
         self.allow_private = self.settings.agent.allow_private
         self.allow_all_group = self.settings.agent.allow_all_group_msg
-
         log.info(f"Bot names: {self.bot_names}")
         log.info(f"Allow @: {self.allow_at}, Allow private: {self.allow_private}, Allow all group: {self.allow_all_group}")
 
-        # 初始化 STT 和音频处理器
+    def _init_audio_and_context(self):
+        """初始化音频处理器和 AppContext"""
         stt_provider = get_stt_provider(self.settings.agent.stt_provider)
         self.audio = AudioProcessor(self.adapter, self.settings, stt_provider)
         log.info(f"Voice mode: {self.settings.agent.voice_mode}, STT provider: {self.settings.agent.stt_provider}")
 
-        # 注册组件到 AppContext
         self.ctx = get_app_context()
         self.ctx.register_agent(self.agent)
         self.ctx.register_mcp_manager(self.mcp_manager)
         self.ctx.register_adapter(self.adapter)
         self.ctx.register_memory_store(self.memory_store)
 
-        # 创建消息处理管线
         self.pipeline = MessagePipeline(self.adapter, self.agent, self.ctx, self.settings, self.audio)
 
-        # 创建群消息聚合器
+    def _init_aggregators(self):
+        """创建消息聚合器"""
         agg_cfg = self.config_loader.config.aggregator
         self.group_aggregator = MessageAggregator(
             initial_wait=agg_cfg.get("initial_wait", 10.0),
@@ -196,7 +212,6 @@ class BotApp:
         )
         log.info(f"Aggregator: density_enabled={agg_cfg.get('density_enabled', False)}, threshold={agg_cfg.get('density_threshold', 10)}")
 
-        # 创建私聊消息聚合器
         priv_cfg = self.config_loader.config.private_aggregator
         if priv_cfg.get("enabled", True):
             self.private_aggregator = MessageAggregator(
@@ -210,7 +225,6 @@ class BotApp:
             self.private_aggregator = None
             log.info("Private aggregator: disabled")
 
-        # 将聚合器引用传给 pipeline（用于 handle_file_upload）
         self.pipeline.set_aggregators(self.group_aggregator, self.private_aggregator)
 
         self.ctx.register_aggregator(self.group_aggregator)
@@ -219,29 +233,25 @@ class BotApp:
         self.ctx.register_preset_manager(self.preset_manager)
         log.success("All components registered to AppContext")
 
-        # 注册消息和事件处理器
+    def _init_event_handlers(self):
+        """注册消息和事件处理器"""
         self.adapter.on_message(self.handle_message)
         self.adapter.on_event(self.handle_event)
 
-        # 启动 Admin Console
+    async def _start_admin(self):
+        """启动 Admin Console"""
         from src.admin.startup import start_admin_server
-        admin_port = self.config_loader.config.admin.get("port", 8088)
-        await start_admin_server(port=admin_port)
+        self._admin_port = self.config_loader.config.admin.get("port", 8088)
+        await start_admin_server(port=self._admin_port)
 
-        # 启动
+    def _log_startup_banner(self):
+        """输出启动完成日志"""
         log.info("=" * 60)
         log.info("Bot is running! Waiting for messages...")
         log.info(f"Triggers: @bot, or mention: {self.bot_names}")
-        log.info(f"Admin Console: http://localhost:{admin_port}")
+        log.info(f"Admin Console: http://localhost:{self._admin_port}")
         log.info("Press Ctrl+C to stop")
         log.info("=" * 60)
-
-        try:
-            await self.adapter.start()
-        except KeyboardInterrupt:
-            log.info("Interrupted by user")
-        finally:
-            await self.stop()
 
     async def stop(self):
         """优雅关闭"""
@@ -270,22 +280,7 @@ class BotApp:
             self.agent.base_url = new_base_url
             self.agent.model = new_model
 
-            # 重建 FallbackLLM（用新的 credentials）
-            import yaml as _yaml
-            try:
-                with open("config.yaml", "r", encoding="utf-8") as _f:
-                    _raw = _yaml.safe_load(_f) or {}
-                model_list = (_raw.get("llm") or {}).get("models", [])
-                if len(model_list) >= 2:
-                    for cfg in model_list:
-                        cfg["api_key"] = new_api_key
-                        cfg["base_url"] = new_base_url
-                    self.agent._fallback_llm = FallbackLLM(model_list)
-                else:
-                    self.agent._fallback_llm = None
-            except Exception:
-                self.agent._fallback_llm = None
-
+            self.agent._fallback_llm = self._create_fallback_llm(api_key=new_api_key, base_url=new_base_url)
             self.agent.graph = self.agent._create_graph()
             log.success("Agent LLM config updated!")
 

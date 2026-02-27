@@ -22,6 +22,12 @@ if TYPE_CHECKING:
     import httpx
 
 from src.utils.logger import log
+from src.utils.config_loader import get_tuning
+
+# ==================== 常量（默认值，可通过 config.yaml tuning 覆盖） ====================
+DEFAULT_DOWNLOAD_TIMEOUT = 30.0
+DEFAULT_SAMPLE_RATE = 24000
+GIF_DEFAULT_FRAME_INDEX = 2
 
 # MIME 类型魔数映射
 MIME_SIGNATURES: dict[bytes, str] = {
@@ -176,7 +182,7 @@ def parse_data_url(data_url: str) -> tuple[bytes, str]:
 
 def extract_gif_frame(
     data: bytes,
-    frame_index: int = 2,
+    frame_index: int = GIF_DEFAULT_FRAME_INDEX,
     output_format: str = "PNG",
 ) -> tuple[bytes, str]:
     """从 GIF 中提取指定帧，转换为静态图片
@@ -256,15 +262,36 @@ def preprocess_image(data: bytes) -> tuple[bytes, str]:
 
     # GIF 预处理
     if mime_type == "image/gif":
-        return extract_gif_frame(data, frame_index=2)
+        return extract_gif_frame(data, frame_index=GIF_DEFAULT_FRAME_INDEX)
 
     return data, mime_type
+
+
+async def _download_resource(
+    url: str,
+    client: "httpx.AsyncClient | None" = None,
+    timeout: float | None = None,
+) -> bytes:
+    """通用资源下载，返回原始字节"""
+    import httpx
+
+    if timeout is None:
+        timeout = get_tuning("download_timeout", DEFAULT_DOWNLOAD_TIMEOUT)
+    if client is None:
+        async with httpx.AsyncClient(timeout=timeout) as temp_client:
+            resp = await temp_client.get(url)
+            resp.raise_for_status()
+            return resp.content
+    else:
+        resp = await client.get(url, timeout=timeout)
+        resp.raise_for_status()
+        return resp.content
 
 
 async def download_image(
     url: str,
     client: "httpx.AsyncClient | None" = None,
-    timeout: float = 30.0,
+    timeout: float | None = None,
 ) -> bytes:
     """下载图片
 
@@ -285,23 +312,13 @@ async def download_image(
         >>> async with httpx.AsyncClient() as client:
         ...     data = await download_image("https://example.com/image.png", client)
     """
-    import httpx
-
-    if client is None:
-        async with httpx.AsyncClient(timeout=timeout) as temp_client:
-            resp = await temp_client.get(url)
-            resp.raise_for_status()
-            return resp.content
-    else:
-        resp = await client.get(url, timeout=timeout)
-        resp.raise_for_status()
-        return resp.content
+    return await _download_resource(url, client, timeout)
 
 
 async def download_and_encode(
     url: str,
     client: "httpx.AsyncClient | None" = None,
-    timeout: float = 30.0,
+    timeout: float | None = None,
     preprocess: bool = True,
 ) -> tuple[str, str]:
     """下载图片并编码为 base64
@@ -347,7 +364,7 @@ def model_supports_audio(model_name: str) -> bool:
     return any(k in name for k in AUDIO_NATIVE_MODELS)
 
 
-def silk_to_wav(data: bytes, sample_rate: int = 24000) -> bytes | None:
+def silk_to_wav(data: bytes, sample_rate: int = DEFAULT_SAMPLE_RATE) -> bytes | None:
     """SILK 音频转 WAV，失败返回 None"""
     try:
         import pysilk
@@ -371,7 +388,7 @@ def ffmpeg_to_wav(data: bytes) -> bytes | None:
         tmp_in.close()
         tmp_out_path = tmp_in.name + ".wav"
         result = subprocess.run(
-            ["ffmpeg", "-y", "-i", tmp_in.name, "-ar", "24000", "-ac", "1", "-f", "wav", tmp_out_path],
+            ["ffmpeg", "-y", "-i", tmp_in.name, "-ar", str(DEFAULT_SAMPLE_RATE), "-ac", "1", "-f", "wav", tmp_out_path],
             capture_output=True, timeout=15,
         )
         if result.returncode != 0:
@@ -403,21 +420,10 @@ def audio_to_wav(data: bytes) -> bytes | None:
 async def download_audio(
     url: str,
     client: "httpx.AsyncClient | None" = None,
-    timeout: float = 30.0,
+    timeout: float | None = None,
 ) -> tuple[bytes, str]:
     """下载音频文件，返回 (原始字节, mime_type)"""
-    import httpx
-
-    if client is None:
-        async with httpx.AsyncClient(timeout=timeout) as temp_client:
-            resp = await temp_client.get(url)
-            resp.raise_for_status()
-            data = resp.content
-    else:
-        resp = await client.get(url, timeout=timeout)
-        resp.raise_for_status()
-        data = resp.content
-
+    data = await _download_resource(url, client, timeout)
     mime = detect_mime_type(data) or "audio/amr"
     return data, mime
 

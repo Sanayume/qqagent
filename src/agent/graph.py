@@ -3,6 +3,7 @@
 使用 LangGraph 构建 ReAct 风格的 Agent。
 """
 
+import asyncio
 import time
 from typing import Literal
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, ToolMessage
@@ -15,6 +16,13 @@ from src.agent.llm import create_llm, extract_response_content, FallbackLLM
 from src.agent.compat import sanitize_messages_for_api  # noqa: F401 — 导入即触发猴子补丁
 from src.core.llm_message import extract_tool_images, extract_send_commands
 from src.utils.logger import log
+
+# ==================== 常量 ====================
+MAX_AGENT_LOOPS = 15
+MEMORY_PREVIEW_LENGTH = 200
+LOG_PREVIEW_LENGTH = 80
+TOOL_ARGS_PREVIEW_LENGTH = 100
+TOOL_EXECUTION_TIMEOUT = 120  # 工具执行超时 (秒)
 
 
 def create_agent_graph(
@@ -57,7 +65,7 @@ def create_agent_graph(
                         None, knowledge_store.search, user_query, state.get("session_id", ""), 3
                     )
                     if memories:
-                        mem_text = "\n".join(f"- {m['content'][:200]}" for m in memories)
+                        mem_text = "\n".join(f"- {m['content'][:MEMORY_PREVIEW_LENGTH]}" for m in memories)
                         system_prompt += f"\n\n## 相关记忆\n{mem_text}"
                 except Exception as e:
                     log.debug(f"Knowledge search failed: {e}")
@@ -80,8 +88,8 @@ def create_agent_graph(
             tool_names = [tc.get('name', '?') for tc in response.tool_calls]
             log.info(f"Agent #{loop_num} | 调用工具: {', '.join(tool_names)} ({elapsed:.2f}s)")
         elif content_preview:
-            preview = content_preview[:80].replace('\n', ' ')
-            log.info(f"Agent #{loop_num} | 回复: {preview}{'...' if len(content_preview) > 80 else ''} ({elapsed:.2f}s)")
+            preview = content_preview[:LOG_PREVIEW_LENGTH].replace('\n', ' ')
+            log.info(f"Agent #{loop_num} | 回复: {preview}{'...' if len(content_preview) > LOG_PREVIEW_LENGTH else ''} ({elapsed:.2f}s)")
         else:
             log.info(f"Agent #{loop_num} | 回复: [空] ({elapsed:.2f}s)")
 
@@ -96,11 +104,28 @@ def create_agent_graph(
         if hasattr(last_message, "tool_calls") and last_message.tool_calls:
             for tc in last_message.tool_calls:
                 tool_name = tc.get('name', '?')
-                args_preview = str(tc.get('args', {}))[:100]
-                log.info(f"工具执行 | {tool_name}({args_preview}{'...' if len(str(tc.get('args', {}))) > 100 else ''})")
+                args_preview = str(tc.get('args', {}))[:TOOL_ARGS_PREVIEW_LENGTH]
+                log.info(f"工具执行 | {tool_name}({args_preview}{'...' if len(str(tc.get('args', {}))) > TOOL_ARGS_PREVIEW_LENGTH else ''})")
 
         start_time = time.time()
-        result = await tool_node.ainvoke(state)
+        try:
+            result = await asyncio.wait_for(
+                tool_node.ainvoke(state),
+                timeout=TOOL_EXECUTION_TIMEOUT
+            )
+        except asyncio.TimeoutError:
+            elapsed = time.time() - start_time
+            log.warning(f"工具执行超时 ({elapsed:.0f}s > {TOOL_EXECUTION_TIMEOUT}s)")
+            # 为每个 tool_call 生成超时错误消息
+            timeout_messages = []
+            if hasattr(last_message, "tool_calls") and last_message.tool_calls:
+                for tc in last_message.tool_calls:
+                    timeout_messages.append(ToolMessage(
+                        content=f"工具执行超时 (>{TOOL_EXECUTION_TIMEOUT}s)，请换一种方式回答用户。",
+                        tool_call_id=tc.get("id", ""),
+                        name=tc.get("name", "unknown"),
+                    ))
+            return {"messages": timeout_messages} if timeout_messages else state
         elapsed = time.time() - start_time
 
         if "messages" in result:
@@ -108,8 +133,8 @@ def create_agent_graph(
                 if isinstance(msg, ToolMessage):
                     tool_name = getattr(msg, 'name', '?')
                     content = msg.content if isinstance(msg.content, str) else str(msg.content)
-                    preview = content[:80].replace('\n', ' ')
-                    log.info(f"工具结果 | {tool_name}: {preview}{'...' if len(content) > 80 else ''} ({elapsed:.2f}s)")
+                    preview = content[:LOG_PREVIEW_LENGTH].replace('\n', ' ')
+                    log.info(f"工具结果 | {tool_name}: {preview}{'...' if len(content) > LOG_PREVIEW_LENGTH else ''} ({elapsed:.2f}s)")
 
         return result
 
@@ -203,6 +228,73 @@ class QQAgent:
         else:
             self._internal_sessions[session_id] = messages
 
+    def _prepare_user_message(self, message: str | HumanMessage) -> tuple[HumanMessage, str]:
+        """将输入转换为 HumanMessage 和预览文本"""
+        if isinstance(message, str):
+            return HumanMessage(content=message), message[:50]
+        elif isinstance(message, HumanMessage):
+            preview = message.content[:50] if isinstance(message.content, str) else "[多模态消息]"
+            return message, preview
+        else:
+            return HumanMessage(content=str(message)), str(message)[:50]
+
+    def _build_initial_state(
+        self, history: list, session_id: str, user_id: int,
+        group_id: int | None, user_name: str, system_prompt: str | None,
+    ) -> "AgentState":
+        """构建初始 AgentState"""
+        return {
+            "messages": history,
+            "session_id": session_id,
+            "user_id": user_id,
+            "group_id": group_id,
+            "user_name": user_name,
+            "preset_name": "default",
+            "system_prompt": self._get_full_system_prompt(system_prompt or self.default_system_prompt),
+            "should_respond": True,
+            "loop_count": 0,
+            "loop_start_time": time.time(),
+        }
+
+    async def _invoke_with_retry(self, state: "AgentState") -> dict:
+        """执行图并在 Agent 未调用 send_message 时重试一次"""
+        from src.utils.config_loader import get_tuning
+        limit = get_tuning("max_agent_loops", MAX_AGENT_LOOPS)
+        result = await self.graph.ainvoke(state, {"recursion_limit": limit})
+
+        has_send = any(
+            isinstance(m, ToolMessage) and getattr(m, "name", None) == "send_message"
+            for m in result["messages"]
+        )
+        if not has_send and extract_response_content(result["messages"][-1]):
+            log.warning("Agent 未调用 send_message，追加提示重试")
+            hint = HumanMessage(content="[系统提示] 你刚才的回复没有通过 send_message 发送，用户无法看到。请调用 send_message 工具发送你的回复。如果你是有意保持沉默则无需操作。")
+            retry_state = dict(result)
+            retry_state["messages"] = [hint]
+            retry_state["loop_count"] = 0
+            retry_state["loop_start_time"] = time.time()
+            result = await self.graph.ainvoke(retry_state, {"recursion_limit": limit})
+
+        return result
+
+    def _save_to_knowledge_store(self, session_id: str, msg_preview: str, message, response_text: str):
+        """异步存入长期记忆"""
+        import asyncio
+        ks = self._knowledge_store
+        user_text = msg_preview if len(msg_preview) < 50 else (
+            message if isinstance(message, str) else str(message.content)[:500]
+        )
+
+        def _save():
+            try:
+                ks.store(session_id, user_text, "user")
+                if response_text:
+                    ks.store(session_id, response_text[:500], "assistant")
+            except Exception as e:
+                log.debug(f"Knowledge store save failed: {e}")
+
+        asyncio.get_event_loop().run_in_executor(None, _save)
+
     async def chat(
         self,
         message: str | HumanMessage,
@@ -219,47 +311,12 @@ class QQAgent:
         history = self._get_history(session_id)
         log.info(f"历史消息: {len(history)} 条")
 
-        if isinstance(message, str):
-            user_message = HumanMessage(content=message)
-            msg_preview = message[:50]
-        elif isinstance(message, HumanMessage):
-            user_message = message
-            msg_preview = message.content[:50] if isinstance(message.content, str) else "[多模态消息]"
-        else:
-            user_message = HumanMessage(content=str(message))
-            msg_preview = str(message)[:50]
-
+        user_message, msg_preview = self._prepare_user_message(message)
         log.info(f"用户输入: {msg_preview}{'...' if len(msg_preview) >= 50 else ''}")
         history.append(user_message)
 
-        state: AgentState = {
-            "messages": history,
-            "session_id": session_id,
-            "user_id": user_id,
-            "group_id": group_id,
-            "user_name": user_name,
-            "preset_name": "default",
-            "system_prompt": self._get_full_system_prompt(system_prompt or self.default_system_prompt),
-            "should_respond": True,
-            "loop_count": 0,
-            "loop_start_time": time.time(),
-        }
-
-        result = await self.graph.ainvoke(state, {"recursion_limit": 15})
-
-        # 检测 Agent 是否调用了 send_message
-        has_send = any(
-            isinstance(m, ToolMessage) and getattr(m, "name", None) == "send_message"
-            for m in result["messages"]
-        )
-        if not has_send and extract_response_content(result["messages"][-1]):
-            log.warning("Agent 未调用 send_message，追加提示重试")
-            hint = HumanMessage(content="[系统提示] 你刚才的回复没有通过 send_message 发送，用户无法看到。请调用 send_message 工具发送你的回复。如果你是有意保持沉默则无需操作。")
-            retry_state = dict(result)
-            retry_state["messages"] = [hint]
-            retry_state["loop_count"] = 0
-            retry_state["loop_start_time"] = time.time()
-            result = await self.graph.ainvoke(retry_state, {"recursion_limit": 15})
+        state = self._build_initial_state(history, session_id, user_id, group_id, user_name, system_prompt)
+        result = await self._invoke_with_retry(state)
 
         ai_message = result["messages"][-1]
         response_text = extract_response_content(ai_message)
@@ -268,21 +325,8 @@ class QQAgent:
 
         self._set_history(session_id, list(result["messages"]))
 
-        # 存入长期记忆（在线程池中执行，避免阻塞事件循环）
         if self._knowledge_store:
-            import asyncio
-            ks = self._knowledge_store
-            user_text = msg_preview if len(msg_preview) < 50 else (message if isinstance(message, str) else str(message.content)[:500])
-
-            def _save():
-                try:
-                    ks.store(session_id, user_text, "user")
-                    if response_text:
-                        ks.store(session_id, response_text[:500], "assistant")
-                except Exception as e:
-                    log.debug(f"Knowledge store save failed: {e}")
-
-            asyncio.get_event_loop().run_in_executor(None, _save)
+            self._save_to_knowledge_store(session_id, msg_preview, message, response_text)
 
         log.info(f"{'─' * 50}")
 

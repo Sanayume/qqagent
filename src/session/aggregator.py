@@ -12,6 +12,9 @@ from typing import Callable, Coroutine, Any
 from src.session.message import PendingMessage
 from src.utils.logger import log
 
+# ==================== 常量 ====================
+MIN_REMAINING_WAIT = 0.5
+
 
 @dataclass
 class _Bucket:
@@ -102,7 +105,7 @@ class MessageAggregator:
             wait = self.initial_wait
         else:
             remaining = self.extended_wait - (now - bucket.first_time)
-            wait = max(0.5, remaining)
+            wait = max(MIN_REMAINING_WAIT, remaining)
             log.debug(f"[{self.label} {key}] 追加消息，剩余等待 {wait:.1f}s")
 
         if self.density_enabled:
