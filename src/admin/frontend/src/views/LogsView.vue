@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, nextTick, computed } from 'vue'
 import { useAuthStore } from '../stores/auth'
-import api from '../api'
+import api, { buildWsUrl } from '../api'
 
 interface LogEntry {
   time: string
@@ -20,6 +20,8 @@ const searchQuery = ref('')
 const selectedLevel = ref('ALL')
 const logContainer = ref<HTMLElement | null>(null)
 let ws: WebSocket | null = null
+let reconnectTimer: ReturnType<typeof setTimeout> | null = null
+let streamStopped = false
 
 const LEVELS = ['ALL', 'DEBUG', 'INFO', 'SUCCESS', 'WARNING', 'ERROR', 'CRITICAL']
 
@@ -63,23 +65,19 @@ const levelCounts = computed(() => {
 })
 
 function connect() {
-  const url = `ws://localhost:8088/api/logs/stream?token=${authStore.token}`
-  console.log('Connecting to:', url)
-  
+  if (streamStopped || !authStore.token) return
+  const url = buildWsUrl('/api/logs/stream', authStore.token)
   ws = new WebSocket(url)
   
   ws.onopen = () => {
     isConnected.value = true
-    console.log('WebSocket connected')
-  }
-  
-  ws.onerror = (e) => {
-    console.error('WebSocket error:', e)
   }
   
   ws.onclose = () => {
     isConnected.value = false
-    setTimeout(connect, 3000)
+    if (!streamStopped) {
+      reconnectTimer = setTimeout(connect, 3000)
+    }
   }
   
   ws.onmessage = (event) => {
@@ -92,8 +90,7 @@ function connect() {
       if (autoScroll.value) {
         scrollToBottom()
       }
-    } catch (e) {
-      console.error('Failed to parse log:', e)
+    } catch {
     }
   }
 }
@@ -120,16 +117,20 @@ function toggleAutoScroll() {
 async function generateTestLogs() {
   try {
     await api.post('/api/logs/test')
-  } catch (e) {
-    console.error('Failed to generate test logs:', e)
+  } catch {
   }
 }
 
 onMounted(() => {
+  streamStopped = false
   connect()
 })
 
 onUnmounted(() => {
+  streamStopped = true
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer)
+  }
   if (ws) {
     ws.close()
   }

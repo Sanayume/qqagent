@@ -48,6 +48,15 @@ class DynamicConfig:
     # 插件开关
     plugins: Dict[str, bool] = field(default_factory=dict)
 
+    # LLM 动态配置
+    llm: Dict[str, Any] = field(default_factory=lambda: {
+        "openai_api_key": "",
+        "openai_api_base": "https://api.openai.com/v1",
+        "google_api_key": "",
+        "default_model": "gpt-4o-mini",
+        "models": []
+    })
+
     # 管理后台配置
     admin: Dict[str, Any] = field(default_factory=lambda: {
         "username": "admin",
@@ -55,6 +64,9 @@ class DynamicConfig:
         "port": 8088,
         "secret_key": "change-me-to-a-random-string",
     })
+
+    # 原始 YAML 数据（供未映射到 dataclass 字段的配置块使用，如 telegram）
+    _raw: Dict[str, Any] = field(default_factory=dict)
 
     # 运维调优参数
     tuning: Dict[str, Any] = field(default_factory=lambda: {
@@ -129,8 +141,10 @@ class ConfigLoader:
             self.config.private_aggregator = data.get("private_aggregator", self.config.private_aggregator)
             self.config.presets = data.get("presets", self.config.presets)
             self.config.plugins = data.get("plugins", self.config.plugins)
+            self.config.llm = {**DynamicConfig().llm, **data.get("llm", {})}
             self.config.admin = data.get("admin", self.config.admin)
             self.config.tuning = {**DynamicConfig().tuning, **data.get("tuning", {})}
+            self.config._raw = data
 
             log.success(f"Config loaded from {self.config_path}")
             
@@ -179,6 +193,30 @@ class ConfigLoader:
     def add_callback(self, callback):
         """添加配置变更回调"""
         self._callbacks.append(callback)
+
+    def get_fallback_llm_models(
+        self,
+        api_key: str = "",
+        base_url: str = "",
+        default_model: str = "",
+    ) -> list[dict[str, Any]]:
+        """获取标准化后的 fallback LLM 模型列表。"""
+        raw_models = self.config.llm.get("models", [])
+        if not isinstance(raw_models, list):
+            return []
+
+        normalized_models = []
+        for item in raw_models:
+            if not isinstance(item, dict):
+                continue
+
+            model_cfg = dict(item)
+            model_cfg.setdefault("api_key", api_key)
+            model_cfg.setdefault("base_url", base_url)
+            model_cfg.setdefault("model", default_model)
+            normalized_models.append(model_cfg)
+
+        return normalized_models
     
     def stop(self):
         """停止监听"""

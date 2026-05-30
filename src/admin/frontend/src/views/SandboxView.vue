@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, nextTick, computed } from 'vue'
 import { useAuthStore } from '../stores/auth'
-import api from '../api'
+import api, { buildWsUrl } from '../api'
 
 // ==================== Types ====================
 interface User {
@@ -44,8 +44,11 @@ const currentUserQQ = ref<number>(10001) // 默认选中的发送者
 const currentChatType = ref<'group' | 'private'>('group')
 const currentChatId = ref<number>(100001) // 当前群ID或对方QQ
 const inputText = ref('')
-const chateArea = ref<HTMLElement | null>(null)
+const chatArea = ref<HTMLElement | null>(null)
 const sending = ref(false)
+const error = ref('')
+let reconnectTimer: ReturnType<typeof setTimeout> | null = null
+let streamStopped = false
 
 // ... (methods) ...
 
@@ -91,32 +94,34 @@ const currentMessages = computed(() => {
 // ==================== Methods ====================
 
 async function fetchState() {
-  const res = await api.get('/api/sandbox/state')
-  users.value = res.data.users
-  groups.value = res.data.groups
-  messages.value = res.data.messages
-  
-  // 确保有默认选中
-  if (!currentUserQQ.value && users.value.length > 0) {
-    const nonBot = users.value.find(u => !u.is_bot)
-    const first = users.value[0]
-    currentUserQQ.value = nonBot?.qq ?? first?.qq ?? 0
+  error.value = ''
+  try {
+    const res = await api.get('/api/sandbox/state')
+    users.value = res.data.users
+    groups.value = res.data.groups
+    messages.value = res.data.messages
+
+    if (!currentUserQQ.value && users.value.length > 0) {
+      const nonBot = users.value.find(u => !u.is_bot)
+      const first = users.value[0]
+      currentUserQQ.value = nonBot?.qq ?? first?.qq ?? 0
+    }
+  } catch (e: any) {
+    error.value = e?.response?.data?.detail || '加载沙盒状态失败'
   }
 }
 
 function connectWS() {
-  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-  const host = import.meta.env.VITE_API_URL 
-    ? import.meta.env.VITE_API_URL.replace(/^http/, 'ws') 
-    : `${protocol}//${window.location.host.replace(/:\d+$/, ':8088')}` 
-    
-  const url = `${host}/api/sandbox/ws?token=${authStore.token}`
+  if (streamStopped || !authStore.token) return
+  const url = buildWsUrl('/api/sandbox/ws', authStore.token)
   ws = new WebSocket(url)
   
   ws.onopen = () => isConnected.value = true
   ws.onclose = () => {
     isConnected.value = false
-    setTimeout(connectWS, 3000)
+    if (!streamStopped) {
+      reconnectTimer = setTimeout(connectWS, 3000)
+    }
   }
   
   ws.onmessage = (event) => {
@@ -138,8 +143,8 @@ function connectWS() {
 
 function scrollToBottom() {
   nextTick(() => {
-    if (chateArea.value) {
-      chateArea.value.scrollTop = chateArea.value.scrollHeight
+    if (chatArea.value) {
+      chatArea.value.scrollTop = chatArea.value.scrollHeight
     }
   })
 }
@@ -159,8 +164,7 @@ async function sendMessage() {
     inputText.value = ''
     scrollToBottom()
   } catch (e) {
-    console.error(e)
-    alert('发送失败')
+    error.value = '消息发送失败'
   } finally {
     sending.value = false
   }
@@ -182,17 +186,23 @@ function formatTime(iso: string) {
 }
 
 onMounted(() => {
+  streamStopped = false
   fetchState().then(scrollToBottom)
   connectWS()
 })
 
 onUnmounted(() => {
+  streamStopped = true
+  if (reconnectTimer) clearTimeout(reconnectTimer)
   if (ws) ws.close()
 })
 </script>
 
 <template>
   <div class="h-full flex gap-4 overflow-hidden">
+    <div v-if="error" class="fixed top-20 right-6 z-50 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700 shadow">
+      {{ error }}
+    </div>
     <!-- 左侧：会话列表 -->
     <div class="w-64 flex flex-col gap-4 bg-night-900/50 backdrop-blur rounded-2xl border border-sakura-500/10 p-4">
       <h2 class="text-white font-bold opacity-80">会话列表</h2>
@@ -246,7 +256,7 @@ onUnmounted(() => {
       </div>
 
       <!-- 消息列表 -->
-      <div ref="chateArea" class="flex-1 overflow-y-auto p-4 space-y-6 custom-scrollbar scroll-smooth">
+      <div ref="chatArea" class="flex-1 overflow-y-auto p-4 space-y-6 custom-scrollbar scroll-smooth">
         <div 
           v-for="msg in currentMessages" 
           :key="msg.message_id"

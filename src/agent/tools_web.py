@@ -1,24 +1,20 @@
-"""Web 搜索工具 - Brave Search API"""
+"""Web search tool backed by Brave Search API."""
 
-import os
+from __future__ import annotations
+
 import httpx
 from langchain_core.tools import tool
+
+from src.utils.config import load_settings
 
 
 @tool
 def web_search(query: str, count: int = 5) -> str:
-    """搜索互联网获取最新信息。当用户询问新闻、实时信息、或你不确定的事实时使用。
-
-    Args:
-        query: 搜索关键词
-        count: 返回结果数量（1-10）
-
-    Returns:
-        格式化的搜索结果
-    """
-    api_key = os.getenv("BRAVE_SEARCH_API_KEY", "")
+    """Search the web for fresh information."""
+    settings = load_settings()
+    api_key = settings.integrations.brave_search_api_key
     if not api_key:
-        return "错误: 未配置 BRAVE_SEARCH_API_KEY"
+        return "??: ??? Brave Search API Key"
 
     count = max(1, min(10, count))
 
@@ -32,17 +28,17 @@ def web_search(query: str, count: int = 5) -> str:
         resp.raise_for_status()
         data = resp.json()
     except Exception as e:
-        return f"搜索失败: {e}"
+        return f"????: {e}"
 
     results = data.get("web", {}).get("results", [])
     if not results:
-        return f"没有找到关于「{query}」的结果"
+        return f"???????{query}????"
 
-    lines = [f"搜索「{query}」的结果：\n"]
-    for i, r in enumerate(results[:count], 1):
-        title = r.get("title", "")
-        url = r.get("url", "")
-        desc = r.get("description", "")
+    lines = [f"???{query}?????\n"]
+    for i, result in enumerate(results[:count], 1):
+        title = result.get("title", "")
+        url = result.get("url", "")
+        desc = result.get("description", "")
         lines.append(f"{i}. {title}\n   {url}\n   {desc}\n")
 
     return "\n".join(lines)

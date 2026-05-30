@@ -16,6 +16,7 @@ import secrets
 import httpx
 from langchain_core.tools import tool
 
+from src.utils.config import load_settings
 from src.utils.config_loader import get_tuning
 from src.utils.logger import log
 
@@ -28,8 +29,6 @@ MAX_CONVERSATION_AGE = 1800          # 30 分钟自动清理
 MAX_CONTENT_LENGTH = 8000            # 截断过长响应
 STREAM_CHUNK_TIMEOUT = 30            # 无数据超过 30 秒视为卡死
 
-OPENCLAW_BASE = os.getenv("OPENCLAW_GATEWAY_URL", "http://127.0.0.1:18789")
-OPENCLAW_TOKEN = os.getenv("OPENCLAW_GATEWAY_TOKEN", "")
 
 # SubAgent 系统提示词 — 告诉 OpenClaw 它的角色定位
 DEFAULT_OPENCLAW_SYSTEM_PROMPT = """\
@@ -226,8 +225,8 @@ def openclaw_agent(task: str, conversation_id: str = "") -> str:
 
     # 构建请求
     headers = {"Content-Type": "application/json"}
-    if OPENCLAW_TOKEN:
-        headers["Authorization"] = f"Bearer {OPENCLAW_TOKEN}"
+    if _get_openclaw_token():
+        headers["Authorization"] = f"Bearer {_get_openclaw_token()}"
 
     # 注入 system prompt（放在 messages 最前面，OpenClaw Gateway 会提取为 extraSystemPrompt）
     system_prompt = _get_config("system_prompt", DEFAULT_OPENCLAW_SYSTEM_PROMPT)
@@ -248,7 +247,7 @@ def openclaw_agent(task: str, conversation_id: str = "") -> str:
         with httpx.Client(proxy=None, trust_env=False) as client:
             with client.stream(
                 "POST",
-                f"{OPENCLAW_BASE}/v1/chat/completions",
+                f"{_get_openclaw_base()}/v1/chat/completions",
                 json=payload,
                 headers=headers,
                 timeout=httpx.Timeout(total_timeout, connect=10.0, read=chunk_timeout),

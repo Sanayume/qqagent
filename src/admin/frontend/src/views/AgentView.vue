@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { ref, onMounted, computed } from 'vue'
-import axios from 'axios'
+import api from '../api'
+import InlineNotice from '../components/InlineNotice.vue'
+import ConfirmDialog from '../components/ConfirmDialog.vue'
 import {
   Bot,
   RefreshCw,
@@ -10,8 +12,6 @@ import {
   AlertCircle,
   Database,
   Wrench,
-  Check,
-  X
 } from 'lucide-vue-next'
 
 interface AgentStatus {
@@ -39,8 +39,11 @@ const status = ref<AgentStatus | null>(null)
 const sessions = ref<Session[]>([])
 const loading = ref(false)
 const reloading = ref(false)
+const deleting = ref(false)
 const error = ref('')
 const successMsg = ref('')
+const clearMode = ref<'single' | 'all' | null>(null)
+const pendingSessionId = ref('')
 
 // LLM Config form
 const llmForm = ref({
@@ -55,7 +58,7 @@ async function fetchStatus() {
   loading.value = true
   error.value = ''
   try {
-    const res = await axios.get('/api/agent/status')
+    const res = await api.get('/api/agent/status')
     status.value = res.data
     llmForm.value.model = res.data.model || ''
     llmForm.value.base_url = res.data.base_url || ''
@@ -68,10 +71,10 @@ async function fetchStatus() {
 
 async function fetchSessions() {
   try {
-    const res = await axios.get('/api/agent/sessions')
+    const res = await api.get('/api/agent/sessions')
     sessions.value = res.data.sessions || []
-  } catch (e) {
-    console.error('Failed to fetch sessions', e)
+  } catch (e: any) {
+    error.value = e.response?.data?.detail || 'Failed to fetch sessions'
   }
 }
 
@@ -85,7 +88,7 @@ async function reloadLLM() {
     if (llmForm.value.base_url) payload.base_url = llmForm.value.base_url
     if (llmForm.value.api_key) payload.api_key = llmForm.value.api_key
 
-    await axios.post('/api/agent/llm/reload', payload)
+    await api.post('/api/agent/llm/reload', payload)
     successMsg.value = 'LLM config reloaded!'
     showLLMForm.value = false
     await fetchStatus()
@@ -96,26 +99,37 @@ async function reloadLLM() {
   }
 }
 
-async function clearSession(sessionId: string) {
-  if (!confirm(`Clear session ${sessionId}?`)) return
-  try {
-    await axios.delete(`/api/agent/sessions/${encodeURIComponent(sessionId)}`)
-    successMsg.value = `Session ${sessionId} cleared`
-    await fetchSessions()
-  } catch (e: any) {
-    error.value = e.response?.data?.detail || 'Failed to clear session'
-  }
+function requestClearSession(sessionId: string) {
+  pendingSessionId.value = sessionId
+  clearMode.value = 'single'
 }
 
-async function clearAllSessions() {
-  if (!confirm('Clear ALL sessions? This cannot be undone.')) return
+function requestClearAllSessions() {
+  clearMode.value = 'all'
+  pendingSessionId.value = ''
+}
+
+async function confirmClear() {
+  if (!clearMode.value) return
+  deleting.value = true
+  error.value = ''
+  successMsg.value = ''
   try {
-    await axios.delete('/api/agent/sessions')
-    successMsg.value = 'All sessions cleared'
+    if (clearMode.value === 'single') {
+      await api.delete(`/api/agent/sessions/${encodeURIComponent(pendingSessionId.value)}`)
+      successMsg.value = `Session ${pendingSessionId.value} cleared`
+    } else {
+      await api.delete('/api/agent/sessions')
+      successMsg.value = 'All sessions cleared'
+    }
     await fetchSessions()
     await fetchStatus()
   } catch (e: any) {
-    error.value = e.response?.data?.detail || 'Failed to clear sessions'
+    error.value = e.response?.data?.detail || 'Failed to clear session(s)'
+  } finally {
+    deleting.value = false
+    clearMode.value = null
+    pendingSessionId.value = ''
   }
 }
 
@@ -152,16 +166,8 @@ onMounted(() => {
     </div>
 
     <!-- Messages -->
-    <div v-if="error" class="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg flex items-center gap-2">
-      <AlertCircle :size="18" />
-      <span class="font-medium">{{ error }}</span>
-      <button @click="error = ''" class="ml-auto"><X :size="16" /></button>
-    </div>
-    <div v-if="successMsg" class="bg-green-50 border border-green-200 text-green-700 px-4 py-3 rounded-lg flex items-center gap-2">
-      <Check :size="18" />
-      <span class="font-medium">{{ successMsg }}</span>
-      <button @click="successMsg = ''" class="ml-auto"><X :size="16" /></button>
-    </div>
+    <InlineNotice v-if="error" type="error" :message="error" @close="error = ''" />
+    <InlineNotice v-if="successMsg" type="success" :message="successMsg" @close="successMsg = ''" />
 
     <!-- Main Grid -->
     <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
@@ -314,7 +320,7 @@ onMounted(() => {
           </div>
           <button
             v-if="sessions.length > 0"
-            @click="clearAllSessions"
+            @click="requestClearAllSessions"
             class="text-xs px-2 py-1 bg-red-50 text-red-600 rounded font-bold hover:bg-red-100 transition-colors"
           >
             Clear All
@@ -339,7 +345,7 @@ onMounted(() => {
               <p class="text-xs text-gray-500">{{ session.message_count }} messages</p>
             </div>
             <button
-              @click="clearSession(session.session_id)"
+              @click="requestClearSession(session.session_id)"
               class="p-1.5 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded transition-colors opacity-0 group-hover:opacity-100"
             >
               <Trash2 :size="14" />
@@ -349,5 +355,17 @@ onMounted(() => {
       </div>
 
     </div>
+
+    <ConfirmDialog
+      :open="Boolean(clearMode)"
+      title="Confirm Clear"
+      :message="clearMode === 'single' ? `Clear session ${pendingSessionId}?` : 'Clear all sessions? This cannot be undone.'"
+      confirm-text="Clear"
+      cancel-text="Cancel"
+      :loading="deleting"
+      danger
+      @close="clearMode = null"
+      @confirm="confirmClear"
+    />
   </div>
 </template>

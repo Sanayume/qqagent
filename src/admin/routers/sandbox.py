@@ -5,6 +5,7 @@
 """
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, HTTPException, BackgroundTasks
+from src.admin.auth import authenticate_websocket
 from pydantic import BaseModel
 from typing import Literal
 
@@ -159,6 +160,10 @@ async def set_agent_mode(req: RealAgentModeRequest):
 
 @router.websocket("/ws")
 async def sandbox_ws(websocket: WebSocket):
+    user = await authenticate_websocket(websocket)
+    if user is None:
+        return
+
     svc = get_sandbox_service()
     await websocket.accept()
     

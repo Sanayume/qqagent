@@ -1,14 +1,17 @@
-"""Embedding 向量生成 - 调用 OpenAI 兼容 API"""
+"""Embedding vector generation via OpenAI-compatible API."""
 
-import os
+from __future__ import annotations
+
 import httpx
+
+from src.utils.config import load_settings
 
 
 def get_embedding(text: str) -> list[float]:
-    """获取文本的 embedding 向量"""
-    api_key = os.getenv("OPENAI_API_KEY", "")
-    base_url = os.getenv("OPENAI_API_BASE", "https://api.openai.com/v1").rstrip("/")
-    model = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
+    settings = load_settings()
+    api_key = settings.embeddings.api_key or settings.llm.openai_api_key
+    base_url = (settings.embeddings.api_base or settings.llm.openai_api_base or "https://api.openai.com/v1").rstrip("/")
+    model = settings.embeddings.model
 
     resp = httpx.post(
         f"{base_url}/embeddings",

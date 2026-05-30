@@ -1,29 +1,42 @@
-import axios from 'axios'
+import axios from "axios"
+
+export function getApiBaseUrl() {
+  const configured = import.meta.env.VITE_API_URL || window.location.origin
+  return configured.replace(/\/$/, "")
+}
+
+export function buildWsUrl(path: string, token?: string | null) {
+  const wsBase = getApiBaseUrl().replace(/^http/, "ws") + "/"
+  const url = new URL(path.replace(/^\//, ""), wsBase)
+  if (token) {
+    url.searchParams.set("token", token)
+  }
+  return url.toString()
+}
 
 const api = axios.create({
-    baseURL: import.meta.env.VITE_API_URL || 'http://localhost:8088',
-    timeout: 10000,
+  baseURL: getApiBaseUrl(),
+  timeout: 10000,
 })
 
-// 请求拦截器 - 添加 Authorization header
 api.interceptors.request.use((config) => {
-    const token = localStorage.getItem('token')
-    if (token) {
-        config.headers.Authorization = `Bearer ${token}`
-    }
-    return config
+  const token = localStorage.getItem("token")
+  if (token) {
+    config.headers = config.headers || {}
+    config.headers.Authorization = `Bearer ${token}`
+  }
+  return config
 })
 
-// 响应拦截器 - 处理 401 错误
 api.interceptors.response.use(
-    (response) => response,
-    (error) => {
-        if (error.response?.status === 401) {
-            localStorage.removeItem('token')
-            window.location.href = '/login'
-        }
-        return Promise.reject(error)
+  (response) => response,
+  (error) => {
+    if (error.response?.status === 401) {
+      localStorage.removeItem("token")
+      window.location.href = "/login"
     }
+    return Promise.reject(error)
+  }
 )
 
 export default api

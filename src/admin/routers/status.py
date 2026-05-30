@@ -1,104 +1,117 @@
-"""
-状态 API
+"""System status endpoints for the admin console."""
 
-提供系统状态信息，通过 AppContext 获取真实运行状态。
-"""
+from __future__ import annotations
 
 from fastapi import APIRouter
-from pathlib import Path
-import json
 
 from src.admin.services.mcp_service import get_mcp_service
 from src.admin.services.preset_service import get_preset_service
 from src.core.context import get_app_context
+from src.utils.config_loader import get_config_loader
 
-router = APIRouter(prefix="/api/status", tags=["状态"])
+router = APIRouter(prefix="/api/status", tags=["status"])
 
 
 @router.get("")
 async def get_status():
-    """获取系统状态"""
     ctx = get_app_context()
+    config_loader = get_config_loader()
     mcp_svc = get_mcp_service()
     preset_svc = get_preset_service()
+    bot_app = ctx.get("bot_app")
 
-    # 获取 MCP 服务器数量
     mcp_servers = mcp_svc.list_servers()
-    mcp_count = len(mcp_servers)
-    mcp_names = list(mcp_servers.keys())
+    preset_list = preset_svc.list_presets()
+    if bot_app and bot_app.settings:
+        current_preset = bot_app.settings.agent.default_preset
+    elif ctx.preset_manager and ctx.preset_manager.get_default():
+        current_preset = ctx.preset_manager.get_default().name
+    else:
+        current_preset = None
 
-    # 获取预设列表
-    presets = preset_svc.list_presets()
-    preset_count = len(presets)
+    runtime_status = bot_app.get_runtime_status() if bot_app else {
+        "admin": {
+            "port": config_loader.config.admin.get("port", 8088),
+            "static_ready": False,
+        },
+        "agent": {
+            "model": ctx.agent.model if ctx.agent else None,
+            "base_url": ctx.agent.base_url if ctx.agent else None,
+            "voice_mode": None,
+            "default_preset": current_preset,
+            "fallback_models": [],
+            "fallback_count": 0,
+        },
+        "onebot": {
+            "mode": None,
+            "connected": ctx.is_adapter_connected,
+            "forward_connected": False,
+            "reverse_connected": False,
+            "ws_url": None,
+            "reverse_endpoint": None,
+            "token_configured": False,
+        },
+        "telegram": {
+            "enabled": bool(config_loader.config._raw.get("telegram", {}).get("enabled", False)),
+            "running": False,
+            "connected": False,
+            "session_path": None,
+            "has_proxy": False,
+            "reconnect_attempt": 0,
+            "last_error": None,
+            "last_error_at": None,
+            "last_connected_at": None,
+            "monitor_channels": [],
+            "monitor_keywords": [],
+        },
+        "reloads": {},
+        "behavior": {
+            "allow_at": None,
+            "allow_private": None,
+            "allow_all_group": None,
+            "bot_names": [],
+        },
+    }
 
-    # 获取当前使用的预设（从 config.yaml 读取）
-    current_preset = "未知"
-    config_path = Path("config.yaml")
-    if config_path.exists():
-        import yaml
-        try:
-            with open(config_path, "r", encoding="utf-8") as f:
-                config = yaml.safe_load(f)
-                # 尝试从配置中获取当前预设
-                if config and "agent" in config:
-                    current_preset = config["agent"].get("preset", "default")
-                elif config and "presets" in config:
-                    # 如果有 presets 配置，取第一个
-                    current_preset = list(config.get("presets", {}).keys())[0] if config.get("presets") else "default"
-        except Exception:
-            pass
-
-    # 使用 AppContext 获取真实 Agent 状态
-    agent_status = "stopped"
-    agent_uptime = "N/A"
-    agent_model = None
-    session_count = 0
-    messages_processed = 0
-
-    if ctx.is_agent_running:
-        agent_status = "running"
-        agent_uptime = ctx.stats.uptime_formatted
-        agent_model = ctx.agent.model if ctx.agent else None
-        messages_processed = ctx.stats.messages_processed
-
-        if ctx.memory_store:
-            session_count = ctx.memory_store.get_session_count()
-
-    # 获取 MCP 运行时状态
     mcp_runtime_status = {}
     if ctx.mcp_manager:
         for name in ctx.mcp_manager.servers:
-            status = ctx.mcp_manager.get_server_status(name)
-            mcp_runtime_status[name] = status
+            mcp_runtime_status[name] = ctx.mcp_manager.get_server_status(name)
 
-    # 获取聚合器配置
-    aggregator_config = {}
-    if config_path.exists():
-        try:
-            with open(config_path, "r", encoding="utf-8") as f:
-                config = yaml.safe_load(f)
-                aggregator_config = config.get("aggregator", {})
-        except Exception:
-            pass
+    session_count = ctx.memory_store.get_session_count() if ctx.memory_store else 0
 
     return {
         "agent": {
-            "status": agent_status,
-            "uptime": agent_uptime,
-            "model": agent_model,
+            "status": "running" if ctx.is_agent_running else "stopped",
+            "running": ctx.is_agent_running,
+            "uptime": ctx.stats.uptime_formatted if ctx.is_agent_running else "N/A",
+            "uptime_seconds": ctx.stats.uptime_seconds if ctx.is_agent_running else 0,
+            "model": runtime_status["agent"]["model"],
+            "base_url": runtime_status["agent"]["base_url"],
+            "voice_mode": runtime_status["agent"]["voice_mode"],
+            "default_preset": runtime_status["agent"]["default_preset"],
             "session_count": session_count,
-            "messages_processed": messages_processed,
+            "messages_processed": ctx.stats.messages_processed,
+            "errors_count": ctx.stats.errors_count,
+            "last_message_time": ctx.stats.last_message_time.isoformat() if ctx.stats.last_message_time else None,
+            "fallback_models": runtime_status["agent"]["fallback_models"],
+            "fallback_count": runtime_status["agent"]["fallback_count"],
         },
+        "onebot": runtime_status["onebot"],
+        "telegram": runtime_status["telegram"],
+        "admin": runtime_status["admin"],
+        "behavior": runtime_status["behavior"],
+        "reloads": runtime_status["reloads"],
         "mcp": {
-            "count": mcp_count,
-            "servers": mcp_names,
+            "count": len(mcp_servers),
+            "servers": list(mcp_servers.keys()),
             "runtime_status": mcp_runtime_status,
         },
         "presets": {
-            "count": preset_count,
-            "list": presets,
+            "count": len(preset_list),
+            "list": preset_list,
             "current": current_preset,
         },
-        "aggregator": aggregator_config,
+        "aggregator": config_loader.config.aggregator,
         "stats": ctx.stats.to_dict(),
     }

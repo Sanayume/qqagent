@@ -294,16 +294,16 @@ class OneBotAdapter:
     
     async def _run_forward_client(self):
         """运行正向 WebSocket 客户端 (带指数退避重连)"""
-        headers = {}
-        if self.token:
-            headers["Authorization"] = f"Bearer {self.token}"
-
         backoff = BackoffStrategy(base_delay=1.0, max_delay=60.0)
         attempt = 0
         max_attempts = 0  # 0 = 无限重试
 
         while self._running:
             try:
+                headers = {}
+                if self.token:
+                    headers["Authorization"] = f"Bearer {self.token}"
+
                 log_connection_status("connecting", f"NapCat ({self.ws_url})")
                 ws_max_size = get_tuning("ws_max_message_size_mb", 200) * 1024 * 1024
                 async with ws_connect(
@@ -472,6 +472,18 @@ class OneBotAdapter:
         """获取活跃的 WebSocket 连接"""
         return self._ws_reverse or self._ws_forward
     
+    @property
+    def connected(self) -> bool:
+        return self._get_active_ws() is not None
+
+    @property
+    def forward_connected(self) -> bool:
+        return self._ws_forward is not None
+
+    @property
+    def reverse_connected(self) -> bool:
+        return self._ws_reverse is not None
+
     async def call_api(self, action: str, params: dict | None = None, timeout: float | None = None) -> dict:
         """调用 OneBot API"""
         if timeout is None:

@@ -185,12 +185,20 @@ class QQAgent:
         self._tools = tools or []
         self._knowledge_store = knowledge_store
         self._fallback_llm = fallback_llm
+        self._session_locks: dict[str, asyncio.Lock] = {}
 
         log.info(f"Initializing QQAgent with model: {model}")
         self.graph = self._create_graph()
 
         self._memory_store = memory_store
         self._internal_sessions: dict[str, list] | None = None if memory_store else {}
+
+    def _get_session_lock(self, session_id: str) -> asyncio.Lock:
+        lock = self._session_locks.get(session_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._session_locks[session_id] = lock
+        return lock
 
     def _create_graph(self):
         log.debug(f"Creating agent graph with model={self.model}, base_url={self.base_url[:30] if self.base_url else 'default'}...")
@@ -270,7 +278,9 @@ class QQAgent:
             log.warning("Agent 未调用 send_message，追加提示重试")
             hint = HumanMessage(content="[系统提示] 你刚才的回复没有通过 send_message 发送，用户无法看到。请调用 send_message 工具发送你的回复。如果你是有意保持沉默则无需操作。")
             retry_state = dict(result)
-            retry_state["messages"] = [hint]
+            retry_messages = list(result["messages"])
+            retry_messages.append(hint)
+            retry_state["messages"] = retry_messages
             retry_state["loop_count"] = 0
             retry_state["loop_start_time"] = time.time()
             result = await self.graph.ainvoke(retry_state, {"recursion_limit": limit})
@@ -308,22 +318,23 @@ class QQAgent:
         log.info(f"{'─' * 50}")
         log.info(f"Agent 开始 | model={self.model} | session={session_id[:20]}")
 
-        history = self._get_history(session_id)
-        log.info(f"历史消息: {len(history)} 条")
+        async with self._get_session_lock(session_id):
+            history = self._get_history(session_id)
+            log.info(f"历史消息: {len(history)} 条")
 
-        user_message, msg_preview = self._prepare_user_message(message)
-        log.info(f"用户输入: {msg_preview}{'...' if len(msg_preview) >= 50 else ''}")
-        history.append(user_message)
+            user_message, msg_preview = self._prepare_user_message(message)
+            log.info(f"用户输入: {msg_preview}{'...' if len(msg_preview) >= 50 else ''}")
+            history.append(user_message)
 
-        state = self._build_initial_state(history, session_id, user_id, group_id, user_name, system_prompt)
-        result = await self._invoke_with_retry(state)
+            state = self._build_initial_state(history, session_id, user_id, group_id, user_name, system_prompt)
+            result = await self._invoke_with_retry(state)
 
-        ai_message = result["messages"][-1]
-        response_text = extract_response_content(ai_message)
-        tool_images = extract_tool_images(result["messages"])
-        pending_sends = extract_send_commands(result["messages"])
+            ai_message = result["messages"][-1]
+            response_text = extract_response_content(ai_message)
+            tool_images = extract_tool_images(result["messages"])
+            pending_sends = extract_send_commands(result["messages"])
 
-        self._set_history(session_id, list(result["messages"]))
+            self._set_history(session_id, list(result["messages"]))
 
         if self._knowledge_store:
             self._save_to_knowledge_store(session_id, msg_preview, message, response_text)

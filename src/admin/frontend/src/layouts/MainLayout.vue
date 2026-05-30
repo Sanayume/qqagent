@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { ref, watch } from 'vue'
 import { useAuthStore } from '../stores/auth'
 import { useRouter, useRoute } from 'vue-router'
 import {
@@ -11,16 +12,24 @@ import {
   LogOut,
   User,
   Bot,
-  Wrench
+  Wrench,
+  Menu,
+  X
 } from 'lucide-vue-next'
 
 const authStore = useAuthStore()
 const router = useRouter()
 const route = useRoute()
+const mobileMenuOpen = ref(false)
 
 function handleLogout() {
   authStore.logout()
   router.push('/login')
+}
+
+function navigateTo(path: string) {
+  mobileMenuOpen.value = false
+  router.push(path)
 }
 
 const menuItems = [
@@ -35,6 +44,13 @@ const menuItems = [
 ]
 
 const isActive = (path: string) => route.path === path
+
+watch(
+  () => route.path,
+  () => {
+    mobileMenuOpen.value = false
+  }
+)
 </script>
 
 <template>
@@ -76,9 +92,18 @@ const isActive = (path: string) => route.path === path
       </nav>
 
       <!-- User Profile -->
-      <div class="flex items-center gap-4">
+      <div class="flex items-center gap-2 md:gap-4">
+        <button
+          @click="mobileMenuOpen = !mobileMenuOpen"
+          class="md:hidden p-2 text-slate-500 hover:text-kivotos-navy transition-colors"
+          :title="mobileMenuOpen ? 'Close Menu' : 'Open Menu'"
+        >
+          <X v-if="mobileMenuOpen" :size="20" />
+          <Menu v-else :size="20" />
+        </button>
+
         <div class="hidden md:flex flex-col items-end">
-          <span class="font-bold text-sm text-kivotos-navy">Administrator</span>
+          <span class="font-bold text-sm text-kivotos-navy">{{ authStore.user?.display_name || 'Administrator' }}</span>
           <span class="text-[10px] bg-kivotos-cyan/10 text-kivotos-cyan px-1 rounded font-mono font-bold">ROOT ACCESS</span>
         </div>
         
@@ -95,6 +120,24 @@ const isActive = (path: string) => route.path === path
         </button>
       </div>
     </header>
+
+    <div
+      v-if="mobileMenuOpen"
+      class="md:hidden sticky top-16 z-40 bg-white/95 backdrop-blur border-b border-gray-200 px-4 py-3"
+    >
+      <div class="grid grid-cols-2 gap-2">
+        <button
+          v-for="item in menuItems"
+          :key="item.path"
+          @click="navigateTo(item.path)"
+          class="h-10 px-3 rounded-lg text-sm font-bold flex items-center gap-2 transition-colors"
+          :class="isActive(item.path) ? 'bg-kivotos-navy text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'"
+        >
+          <component :is="item.icon" :size="14" />
+          <span>{{ item.name }}</span>
+        </button>
+      </div>
+    </div>
 
     <!-- Main Content Area with Geometric Decorations -->
     <main class="flex-1 relative p-6 overflow-hidden">

@@ -26,6 +26,8 @@ package-lock.json
 *.log
 log.txt
 data/*.db
+data/*.session
+data/tg_news/
 *.sqlite
 *.sqlite3
 
@@ -34,6 +36,8 @@ workspace/*
 tmp*/
 tmpclaude*
 .claude/
+.omx/
+.serena/
 
 # Frontend build artifacts (hash-named bundles)
 src/admin/static/assets/
@@ -48,12 +52,12 @@ src/admin/static/assets/
 test_*.py
 test_*.js
 test1.py
-
+*.txt
 # Config (sensitive)
 config/mcp_servers.json
 config/admin_users.json
 mcp_servers.json
-
+config.yaml
 # Misc
 implementation_plan.md
 debug*

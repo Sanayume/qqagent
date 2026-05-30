@@ -1,0 +1,73 @@
+session:
+  global_users: []
+  per_user_groups: []
+  all_groups_per_user: false
+
+admin:
+  username: admin
+  password: admin123
+  port: 8088
+  secret_key: change-me-to-a-random-string
+
+aggregator:
+  initial_wait: 20.0
+  extended_wait: 10.0
+  density_enabled: true
+  density_threshold: 2
+  density_window: 60.0
+  density_cooldown: 60.0
+
+private_aggregator:
+  enabled: true
+  initial_wait: 3.0
+  extended_wait: 5.0
+
+presets:
+  default:
+    system_prompt: "Config loaded from YAML!"
+
+plugins:
+  weather: true
+
+tuning:
+  max_agent_loops: 15
+  llm_failure_threshold: 5
+  llm_recovery_timeout: 60.0
+  onebot_failure_threshold: 10
+  onebot_recovery_timeout: 30.0
+  media_failure_threshold: 8
+  media_recovery_timeout: 30.0
+  download_timeout: 30.0
+  api_timeout: 30
+  ws_max_message_size_mb: 200
+  audio_max_duration_seconds: 55
+  knowledge_vector_search_limit: 200
+  knowledge_cosine_threshold: 0.3
+  knowledge_bm25_weight: 0.4
+  knowledge_vector_weight: 0.6
+  openclaw_timeout: 120
+  openclaw_model: default
+  openclaw_stream_chunk_timeout: 30
+  openclaw_system_prompt: ""
+
+llm:
+  models:
+    - model: gpt-5.2
+    - model: gemini-3-flash-preview
+      api_key: ""
+      base_url: ""
+
+telegram:
+  enabled: false
+  session_name: "tg_session"
+  monitor:
+    groups: []
+    keywords: []
+    min_length: 20
+    aggregate_seconds: 60
+    cooldown_seconds: 300
+    summarize: true
+  broadcast:
+    tg_self: false
+    qq_groups: []
+    qq_users: []

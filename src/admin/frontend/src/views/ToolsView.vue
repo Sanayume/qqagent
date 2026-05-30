@@ -1,14 +1,12 @@
 <script setup lang="ts">
-import { ref, onMounted, computed } from 'vue'
-import axios from 'axios'
+import { ref, onMounted, onUnmounted, computed } from 'vue'
+import api from '../api'
+import InlineNotice from '../components/InlineNotice.vue'
 import {
   Wrench,
   RefreshCw,
   ToggleLeft,
   ToggleRight,
-  AlertCircle,
-  Check,
-  X,
   Shield,
   Server
 } from 'lucide-vue-next'
@@ -50,6 +48,8 @@ const error = ref('')
 const successMsg = ref('')
 const filter = ref<string>('all')
 const viewMode = ref<'all' | 'builtin' | 'mcp'>('all')
+const togglingTools = ref<Record<string, boolean>>({})
+let successTimer: ReturnType<typeof setTimeout> | null = null
 
 const categoryLabels: Record<string, string> = {
   core: 'Core',
@@ -64,11 +64,11 @@ async function fetchTools() {
   loading.value = true
   error.value = ''
   try {
-    const res = await axios.get('/api/tools')
+    const res = await api.get('/api/tools')
     tools.value = res.data.tools || []
     status.value = res.data.status || null
     // Fetch MCP servers
-    const mcpRes = await axios.get('/api/tools/mcp/servers')
+    const mcpRes = await api.get('/api/tools/mcp/servers')
     mcpServers.value = mcpRes.data.servers || {}
   } catch (e: any) {
     error.value = e.response?.data?.detail || 'Failed to fetch tools'
@@ -79,19 +79,28 @@ async function fetchTools() {
 
 async function toggleTool(tool: Tool) {
   if (tool.is_core) return
+  if (togglingTools.value[tool.name]) return
 
+  togglingTools.value[tool.name] = true
+  error.value = ''
   try {
-    await axios.post(`/api/tools/${tool.name}/toggle`, {
+    await api.post(`/api/tools/${tool.name}/toggle`, {
       enabled: !tool.enabled
     })
     tool.enabled = !tool.enabled
     successMsg.value = `${tool.name} ${tool.enabled ? 'enabled' : 'disabled'}`
-    setTimeout(() => successMsg.value = '', 2000)
+    if (successTimer) clearTimeout(successTimer)
+    successTimer = setTimeout(() => {
+      successMsg.value = ''
+      successTimer = null
+    }, 2000)
     // Refresh status
-    const res = await axios.get('/api/tools/status')
+    const res = await api.get('/api/tools/status')
     status.value = res.data
   } catch (e: any) {
     error.value = e.response?.data?.detail || 'Failed to toggle tool'
+  } finally {
+    togglingTools.value[tool.name] = false
   }
 }
 
@@ -122,6 +131,10 @@ const categories = computed(() => {
 
 onMounted(() => {
   fetchTools()
+})
+
+onUnmounted(() => {
+  if (successTimer) clearTimeout(successTimer)
 })
 </script>
 
@@ -160,15 +173,8 @@ onMounted(() => {
     </div>
 
     <!-- Messages -->
-    <div v-if="error" class="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg flex items-center gap-2">
-      <AlertCircle :size="18" />
-      <span class="font-medium">{{ error }}</span>
-      <button @click="error = ''" class="ml-auto"><X :size="16" /></button>
-    </div>
-    <div v-if="successMsg" class="bg-green-50 border border-green-200 text-green-700 px-4 py-3 rounded-lg flex items-center gap-2">
-      <Check :size="18" />
-      <span class="font-medium">{{ successMsg }}</span>
-    </div>
+    <InlineNotice v-if="error" type="error" :message="error" @close="error = ''" />
+    <InlineNotice v-if="successMsg" type="success" :message="successMsg" @close="successMsg = ''" />
 
     <!-- Status Cards -->
     <div class="grid grid-cols-2 md:grid-cols-6 gap-4" v-if="status">
@@ -262,7 +268,7 @@ onMounted(() => {
             </div>
             <button
               @click="toggleTool(tool)"
-              :disabled="tool.is_core"
+              :disabled="tool.is_core || togglingTools[tool.name]"
               class="p-2 rounded-lg transition-colors"
               :class="tool.is_core
                 ? 'text-gray-300 cursor-not-allowed'
@@ -271,7 +277,8 @@ onMounted(() => {
                   : 'text-gray-400 hover:bg-gray-100'"
               :title="tool.is_core ? 'Core tools cannot be disabled' : (tool.enabled ? 'Disable' : 'Enable')"
             >
-              <ToggleRight v-if="tool.enabled" :size="24" />
+              <RefreshCw v-if="togglingTools[tool.name]" :size="20" class="animate-spin" />
+              <ToggleRight v-else-if="tool.enabled" :size="24" />
               <ToggleLeft v-else :size="24" />
             </button>
           </div>
