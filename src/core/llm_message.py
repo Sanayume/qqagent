@@ -301,6 +301,27 @@ def strip_images_from_message(message: HumanMessage) -> HumanMessage:
     return HumanMessage(content=text)
 
 
+def merge_text_messages(texts: list[str]) -> str:
+    """Merge non-empty text fragments with newlines."""
+    return "\n".join(text for text in texts if text)
+
+
+def build_context_message(
+    main_text: str,
+    reply_context: str | None = None,
+    forward_summary: str | None = None,
+) -> str:
+    """Build a compact context block for legacy callers."""
+    parts = []
+    if reply_context:
+        parts.append(f"[引用消息:\n{reply_context}\n]")
+    if forward_summary:
+        parts.append(f"[合并转发:\n{forward_summary}\n]")
+    if main_text:
+        parts.append(main_text)
+    return "\n".join(parts)
+
+
 # ==================== 富上下文消息 ====================
 
 

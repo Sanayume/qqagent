@@ -6,7 +6,7 @@
 
 from typing import Optional
 from pydantic import BaseModel
-from src.utils.logger import log
+from src.admin.security import DEFAULT_ADMIN_USERNAME, verify_admin_password
 
 
 class AdminUser(BaseModel):
@@ -35,12 +35,8 @@ class UserService:
             AdminUser 如果认证成功，否则 None
         """
         cfg = self._get_admin_config()
-        expected_user = cfg.get("username", "admin")
-        expected_pass = cfg.get("password", "admin123")
 
-        if username != expected_user:
-            return None
-        if password != expected_pass:
+        if not verify_admin_password(cfg, username, password):
             return None
 
         return AdminUser(
@@ -52,7 +48,7 @@ class UserService:
     def get_user(self, username: str) -> Optional[AdminUser]:
         """获取用户（仅当用户名匹配配置时返回）"""
         cfg = self._get_admin_config()
-        expected_user = cfg.get("username", "admin")
+        expected_user = cfg.get("username", DEFAULT_ADMIN_USERNAME)
         if username != expected_user:
             return None
         return AdminUser(

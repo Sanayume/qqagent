@@ -170,6 +170,20 @@ class ToolRegistry:
 
         return self
 
+    def register_tool(
+        self,
+        tool: BaseTool,
+        category: ToolCategory = ToolCategory.UTILITY,
+        source: ToolSource = ToolSource.BUILTIN,
+    ) -> "ToolRegistry":
+        """Compatibility wrapper for the older registry API."""
+        return self.register(
+            tool,
+            category=category,
+            source=source,
+            is_core=category == ToolCategory.CORE,
+        )
+
     def get_enabled_tools(self) -> list[BaseTool]:
         """获取所有启用的工具"""
         return [
@@ -191,6 +205,37 @@ class ToolRegistry:
         return [
             meta for meta in self._tools.values()
             if meta.category == category
+        ]
+
+    def get_all_tools(self) -> list[ToolMeta]:
+        """Compatibility wrapper returning all registered tool metadata."""
+        return self.list_tools()
+
+    def get_tool_info(self, name: str) -> dict | None:
+        """Compatibility wrapper returning dict metadata with enum fields."""
+        meta = self.get_tool(name)
+        if meta is None:
+            return None
+        return {
+            "name": meta.name,
+            "description": meta.description,
+            "category": meta.category,
+            "source": meta.source,
+            "source_name": meta.source_name,
+            "is_core": meta.is_core,
+            "enabled": meta.enabled,
+            "version": meta.version,
+            "author": meta.author,
+            "tags": meta.tags,
+            "tool": meta.tool,
+        }
+
+    def get_tools_by_category(self, category: ToolCategory) -> list[dict]:
+        """Compatibility wrapper returning dict metadata by category."""
+        return [
+            info
+            for meta in self.list_by_category(category)
+            if (info := self.get_tool_info(meta.name)) is not None
         ]
 
     def enable_tool(self, name: str) -> bool:

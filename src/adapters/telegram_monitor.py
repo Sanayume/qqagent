@@ -133,6 +133,7 @@ class NewsMonitor:
         agent: "QQAgent | None",
         monitor_cfg: dict,
         broadcast_cfg: dict,
+        persona_prompt: str = "",
     ):
         self._tg = tg_adapter
         self._agent = agent
@@ -145,10 +146,15 @@ class NewsMonitor:
         self._aggregate_sec: float = float(monitor_cfg.get("aggregate_seconds", 60))
         self._cooldown_sec: float = float(monitor_cfg.get("cooldown_seconds", 300))
         self._summarize: bool = monitor_cfg.get("summarize", True)
+        self._max_buffer_messages: int = int(monitor_cfg.get("max_buffer_messages", 50))
+        self._dedupe_seconds: float = float(monitor_cfg.get("dedupe_seconds", 300))
+        self._store_raw: bool = bool(monitor_cfg.get("store_raw", True))
+        self._persona_prompt = persona_prompt or str(monitor_cfg.get("persona_prompt", "") or "")
 
         # 运行时状态
         self._buffers: dict[int, _GroupBuffer] = {}   # chat_id -> buffer
         self._watch_ids: dict[int, str] = {}          # chat_id -> 频道名
+        self._seen_messages: dict[str, float] = {}
         self._running = False
         self._event_count = 0
 
@@ -234,7 +240,51 @@ class NewsMonitor:
                 log.debug(f"[TG] chat_id {chat_id} 消息不包含关键词，跳过")
                 return
 
+        text_clean = text.strip()
+        if self._is_duplicate(chat_id, text_clean):
+            log.debug(f"[TG] chat_id {chat_id} 重复消息，跳过")
+            return
+
         # 写入本地结构化存储 (用于后续知识库向量化)
+        if self._store_raw:
+            self._store_raw_message(chat_id, text_clean)
+
+        # 进入缓冲区 (发送前先清理前后空白符)
+        if chat_id not in self._buffers:
+            self._buffers[chat_id] = _GroupBuffer()
+
+        buf = self._buffers[chat_id]
+        buf.messages.append(text_clean)
+        if len(buf.messages) > self._max_buffer_messages:
+            overflow = len(buf.messages) - self._max_buffer_messages
+            del buf.messages[:overflow]
+            log.warning(f"NewsMonitor: chat_id={chat_id} 缓冲超过上限，丢弃最旧 {overflow} 条")
+
+        # 重置聚合定时器
+        if buf.timer_task and not buf.timer_task.done():
+            buf.timer_task.cancel()
+
+        buf.timer_task = asyncio.create_task(
+            self._flush_after(chat_id, self._aggregate_sec)
+        )
+        channel_name = self._watch_ids.get(chat_id, str(chat_id))
+        log.info(f"NewsMonitor: 获取到 TG @{channel_name} 的资讯，已加入缓冲 (缓冲中 {len(buf.messages)} 条)")
+
+    def _is_duplicate(self, chat_id: int, text: str) -> bool:
+        now = time.time()
+        expire_before = now - self._dedupe_seconds
+        self._seen_messages = {
+            key: ts for key, ts in self._seen_messages.items()
+            if ts >= expire_before
+        }
+        key = f"{chat_id}:{hash(text[:1000])}"
+        if key in self._seen_messages:
+            return True
+        self._seen_messages[key] = now
+        return False
+
+    @staticmethod
+    def _store_raw_message(chat_id: int, text: str) -> None:
         import datetime
         from pathlib import Path
 
@@ -246,28 +296,9 @@ class NewsMonitor:
         store_dir.mkdir(parents=True, exist_ok=True)
         store_file = store_dir / f"{date_str}.txt"
 
-        # 结构化格式：[YYYY-MM-DD HH:MM:SS] [ChatID] \n内容\n===
         record = f"[{date_str} {time_str}] [ChatID:{chat_id}]\n{text}\n===\n\n"
         with open(store_file, "a", encoding="utf-8") as f:
             f.write(record)
-
-        # 进入缓冲区 (发送前先清理前后空白符)
-        text_clean = text.strip()
-        if chat_id not in self._buffers:
-            self._buffers[chat_id] = _GroupBuffer()
-
-        buf = self._buffers[chat_id]
-        buf.messages.append(text_clean)
-
-        # 重置聚合定时器
-        if buf.timer_task and not buf.timer_task.done():
-            buf.timer_task.cancel()
-
-        buf.timer_task = asyncio.create_task(
-            self._flush_after(chat_id, self._aggregate_sec)
-        )
-        channel_name = self._watch_ids.get(chat_id, str(chat_id))
-        log.info(f"NewsMonitor: 获取到 TG @{channel_name} 的资讯，已加入缓冲 (缓冲中 {len(buf.messages)} 条)")
 
     async def _flush_after(self, chat_id: int, delay: float) -> None:
         """等待聚合窗口到期后 flush。"""
@@ -340,16 +371,18 @@ class NewsMonitor:
         now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
         header = f"📰 [来自TG实时资讯 | {now_str}]\n"
 
+        persona = self._persona_prompt.strip()
+        persona_block = f"【当前角色风格】\n{persona}\n\n" if persona else ""
         prompt = (
+            f"{persona_block}"
             f"【系统后台提供的数据】刚才在 {now_str}，系统从 Telegram 资讯渠道拉取到了以下几条最新消息：\n\n{text}\n\n"
-            f"【你的任务】：\n"
-            f"你现在是群里的老群友'琪露诺'，看到上面这些TG消息，就当自己刷到了几条资讯，挑你觉得有乐子、有信息量、或者跟技术/翻墙/二次元相关的几条出来聊聊~喵\n\n"
-            f"【具体要求】：\n"
-            f"1）先整体扫一眼这些消息，可以一条都不选，也可以选1-3条你最感兴趣的来讲，不感兴趣的就直接无视，不用强行逐条回应~喵\n"
-            f"2）对每一条你想说的资讯，用1-3句话：用自己的话概括核心内容+重要数字，顺带点名大概来源（比如'某TG频道'、'某机场广告'等），再加一句你的主观吐槽/锐评~喵\n"
-            f"3）风格要像在群里正常聊天：口语化、可以玩梗、自嘲和吐槽，但不要用'1.2.3.'这种死板列表格式，也不要像新闻联播~喵\n"
-            f"4）如果原消息里有明显的链接或频道名，可以自然地提一下，方便群友自己去翻原帖看乐子；没看到就不用硬编来源~喵\n"
-            f"5）整体长度不用卡150字，信息说清楚、吐槽到位就收，不要写成长篇论文~喵\n"
+            f"【你的任务】\n"
+            f"像群里正常聊天一样，挑你觉得有信息量、有趣、或和当前群聊气质相关的 1-3 条资讯分享。\n\n"
+            f"【具体要求】\n"
+            f"- 用自己的话概括核心内容和重要数字，必要时自然提到来源或链接。\n"
+            f"- 可以有主观点评，但不要编造原文没有的信息。\n"
+            f"- 不要强行逐条回应，不感兴趣或低价值的信息可以忽略。\n"
+            f"- 不要写成新闻稿或编号列表，整体保持短、清楚、适合聊天窗口阅读。\n"
         )
 
         # 构建 send_message 实时回调 —— 和 pipeline.py 同样的模式

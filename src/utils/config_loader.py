@@ -63,6 +63,13 @@ class DynamicConfig:
         "password": "admin123",
         "port": 8088,
         "secret_key": "change-me-to-a-random-string",
+        "cors_origins": [
+            "http://127.0.0.1:8088",
+            "http://localhost:8088",
+            "http://127.0.0.1:5173",
+            "http://localhost:5173",
+        ],
+        "allow_query_token": False,
     })
 
     # 原始 YAML 数据（供未映射到 dataclass 字段的配置块使用，如 telegram）
@@ -142,7 +149,7 @@ class ConfigLoader:
             self.config.presets = data.get("presets", self.config.presets)
             self.config.plugins = data.get("plugins", self.config.plugins)
             self.config.llm = {**DynamicConfig().llm, **data.get("llm", {})}
-            self.config.admin = data.get("admin", self.config.admin)
+            self.config.admin = {**DynamicConfig().admin, **data.get("admin", {})}
             self.config.tuning = {**DynamicConfig().tuning, **data.get("tuning", {})}
             self.config._raw = data
 

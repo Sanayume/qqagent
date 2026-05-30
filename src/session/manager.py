@@ -37,7 +37,15 @@ class SessionManager:
     使用 ConfigLoader 动态获取最新配置。
     """
     
-    def __init__(self, use_loader: bool = True):
+    def __init__(
+        self,
+        global_users: list[int] | set[int] | None = None,
+        per_user_groups: list[int] | set[int] | None = None,
+        all_groups_per_user: bool = False,
+        use_loader: bool = False,
+    ):
+        if global_users is not None or per_user_groups is not None or all_groups_per_user:
+            use_loader = False
         self.use_loader = use_loader
         if use_loader:
             from src.utils.config_loader import get_config_loader
@@ -46,8 +54,24 @@ class SessionManager:
             self.loader.add_callback(self._on_config_update)
             log.info("SessionManager initialized with dynamic config loader")
         else:
-            self.static_session_config = {"global_users": [], "per_user_groups": [], "all_groups_per_user": False}
+            self.static_session_config = {
+                "global_users": list(global_users or []),
+                "per_user_groups": list(per_user_groups or []),
+                "all_groups_per_user": all_groups_per_user,
+            }
             log.info("SessionManager initialized with static config")
+
+    @property
+    def global_users(self) -> list[int]:
+        return list(self.config.get("global_users", []))
+
+    @property
+    def per_user_groups(self) -> list[int]:
+        return list(self.config.get("per_user_groups", []))
+
+    @property
+    def all_groups_per_user(self) -> bool:
+        return bool(self.config.get("all_groups_per_user", False))
 
     def _on_config_update(self, config):
         log.info("SessionManager: Configuration updated")
@@ -81,7 +105,7 @@ class SessionManager:
         # 规则 1: 全局用户
         global_users = set(cfg.get("global_users", []))
         if user_id in global_users:
-            session_id = f"global_{user_id}"
+            session_id = f"user_{user_id}"
             log.debug(f"Session (global user): {session_id}")
             return session_id
         

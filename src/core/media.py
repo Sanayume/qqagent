@@ -177,6 +177,36 @@ def parse_data_url(data_url: str) -> tuple[bytes, str]:
         raise ValueError(f"Invalid data URL format: {e}") from e
 
 
+def make_data_url(data: bytes, mime_type: str | None = None) -> str:
+    """Build a base64 data URL from raw bytes."""
+    mime = mime_type or detect_mime_type(data)
+    return make_data_url_from_base64(encode_base64(data), mime)
+
+
+def make_data_url_from_base64(b64_data: str, mime_type: str) -> str:
+    """Build a data URL from existing base64 text."""
+    return f"data:{mime_type};base64,{b64_data}"
+
+
+def is_image_url(url: str) -> bool:
+    """Return True when a URL path looks like an image."""
+    from urllib.parse import urlparse
+
+    path = urlparse(url).path.lower()
+    return any(path.endswith(f".{ext}") for ext in ("png", "jpg", "jpeg", "gif", "webp", "bmp"))
+
+
+def get_image_size_estimate(b64_data: str) -> int:
+    """Estimate decoded byte size from base64 length."""
+    padding = len(b64_data) - len(b64_data.rstrip("="))
+    return max(0, (len(b64_data) * 3) // 4 - padding)
+
+
+def is_base64_image_too_large(b64_data: str, max_size_mb: float) -> bool:
+    """Check whether a base64 image exceeds a size limit."""
+    return get_image_size_estimate(b64_data) > max_size_mb * 1024 * 1024
+
+
 # ==================== 异步下载函数 ====================
 
 

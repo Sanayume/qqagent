@@ -12,6 +12,8 @@ from fastapi.staticfiles import StaticFiles
 
 from src.admin.auth import verify_token
 from src.admin.routers import auth
+from src.admin.security import get_admin_security_warnings
+from src.utils.config_loader import get_config_loader
 from src.utils.logger import log
 
 
@@ -22,6 +24,8 @@ async def lifespan(app: FastAPI):
     from src.admin.services.user_service import get_user_service
 
     get_user_service()
+    for warning in get_admin_security_warnings(get_config_loader().config.admin):
+        log.warning(f"Admin security warning: {warning}")
 
     log.success("Admin Console started")
     log.info("Visit: http://localhost:8088")
@@ -38,7 +42,10 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=get_config_loader().config.admin.get(
+        "cors_origins",
+        ["http://127.0.0.1:8088", "http://localhost:8088", "http://127.0.0.1:5173", "http://localhost:5173"],
+    ),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -55,7 +62,7 @@ async def protect_admin_api(request: Request, call_next):
     token = None
     if auth_header.lower().startswith("bearer "):
         token = auth_header[7:].strip()
-    elif request.query_params.get("token"):
+    elif get_config_loader().config.admin.get("allow_query_token", False) and request.query_params.get("token"):
         token = request.query_params.get("token", "").strip()
 
     if not token:

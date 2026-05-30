@@ -6,6 +6,7 @@ from fastapi import APIRouter
 
 from src.admin.services.mcp_service import get_mcp_service
 from src.admin.services.preset_service import get_preset_service
+from src.admin.security import get_admin_security_warnings
 from src.core.context import get_app_context
 from src.utils.config_loader import get_config_loader
 
@@ -102,6 +103,11 @@ async def get_status():
         "admin": runtime_status["admin"],
         "behavior": runtime_status["behavior"],
         "reloads": runtime_status["reloads"],
+        "scheduler": runtime_status.get("scheduler", {}),
+        "config": runtime_status.get("config", {}),
+        "security": {
+            "warnings": get_admin_security_warnings(config_loader.config.admin),
+        },
         "mcp": {
             "count": len(mcp_servers),
             "servers": list(mcp_servers.keys()),

@@ -41,6 +41,7 @@ class ParsedMessage:
     at_targets: list[str] = field(default_factory=list)
     face_ids: list[int] = field(default_factory=list)
     mface_summaries: list[str] = field(default_factory=list)
+    file_urls: list[str] = field(default_factory=list)
     file_paths: list[str] = field(default_factory=list)
     file_names: list[str] = field(default_factory=list)
     file_sizes: list[int] = field(default_factory=list)
@@ -58,7 +59,7 @@ class ParsedMessage:
 
     def has_files(self) -> bool:
         """是否包含文件"""
-        return bool(self.file_paths or self.file_names or self.file_ids)
+        return bool(self.file_urls or self.file_paths or self.file_names or self.file_ids)
 
     def has_reply(self) -> bool:
         """是否是回复消息"""
@@ -149,9 +150,12 @@ def parse_segments(segments: list[dict]) -> ParsedMessage:
             result.mface_summaries.append(summary)
 
         elif seg_type == "file":
+            url = data.get("url", "")
             name = data.get("name", data.get("file", ""))
             size = data.get("file_size", data.get("size", 0))
             file_id = data.get("file_id", "")
+            if url:
+                result.file_urls.append(url)
             if name:
                 result.file_names.append(name)
             if file_id:
@@ -513,7 +517,7 @@ def make_text_description(parsed: ParsedMessage) -> str:
         parts.append(f"[图片x{count}]")
 
     if parsed.has_files():
-        count = len(parsed.file_names) or len(parsed.file_ids)
+        count = len(parsed.file_names) or len(parsed.file_ids) or len(parsed.file_urls) or len(parsed.file_paths)
         parts.append(f"[文件x{count}]")
 
     if parsed.has_record:

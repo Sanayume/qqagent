@@ -78,15 +78,17 @@ class KnowledgeStore:
             )
             conn.commit()
 
-    def _bm25_search(self, conn, query: str, limit: int) -> dict[int, dict]:
+    def _bm25_search(self, conn, query: str, session_id: str, limit: int) -> dict[int, dict]:
         """BM25 全文搜索"""
         results = {}
         try:
             safe_query = '"' + query.replace('"', '""') + '"'
             rows = conn.execute(
-                "SELECT rowid, content, rank FROM memory_fts "
-                "WHERE memory_fts MATCH ? ORDER BY rank LIMIT ?",
-                (safe_query, limit * 2),
+                "SELECT f.rowid, f.content, f.rank FROM memory_fts AS f "
+                "JOIN memory_chunks AS c ON c.id = f.rowid "
+                "WHERE memory_fts MATCH ? AND c.session_id = ? "
+                "ORDER BY f.rank LIMIT ?",
+                (safe_query, session_id, limit * 2),
             ).fetchall()
             for row_id, content, rank in rows:
                 results[row_id] = {"id": row_id, "content": content, "bm25": -rank, "cosine": 0.0}
@@ -127,7 +129,7 @@ class KnowledgeStore:
     def search(self, query: str, session_id: str, limit: int = 5) -> list[dict]:
         """搜索相关记忆，BM25 + 向量余弦混合排序"""
         with sqlite3.connect(self.db_path) as conn:
-            results = self._bm25_search(conn, query, limit)
+            results = self._bm25_search(conn, query, session_id, limit)
 
             query_emb = None
             try:

@@ -5,6 +5,9 @@
 """
 
 import contextvars
+import ast
+import operator
+from datetime import datetime
 from typing import Any, Callable
 from langchain_core.tools import tool
 from src.utils.logger import log
@@ -13,6 +16,62 @@ from src.utils.logger import log
 MAX_DELAY_MINUTES = 1440
 TEXT_PREVIEW_LENGTH = 50
 MAX_RENDER_TEXT_LENGTH = 50000
+
+
+def get_current_time() -> str:
+    """Return the current local time as HH:MM:SS."""
+    return datetime.now().strftime("%H:%M:%S")
+
+
+def get_current_date() -> str:
+    """Return the current local date as YYYY-MM-DD."""
+    return datetime.now().strftime("%Y-%m-%d")
+
+
+def calculate(expression: str) -> str:
+    """Safely evaluate a simple arithmetic expression."""
+    try:
+        return str(safe_eval(expression))
+    except Exception as e:
+        return f"错误: {e}"
+
+
+def safe_eval(expression: str) -> int | float:
+    """Safely evaluate arithmetic used by the calculate tool."""
+    operators = {
+        ast.Add: operator.add,
+        ast.Sub: operator.sub,
+        ast.Mult: operator.mul,
+        ast.Div: operator.truediv,
+        ast.Pow: operator.pow,
+        ast.Mod: operator.mod,
+        ast.USub: operator.neg,
+        ast.UAdd: operator.pos,
+    }
+    safe_functions = {
+        "abs": abs,
+        "round": round,
+        "min": min,
+        "max": max,
+    }
+
+    def eval_node(node):
+        if isinstance(node, ast.Expression):
+            return eval_node(node.body)
+        if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
+            return node.value
+        if isinstance(node, ast.UnaryOp) and type(node.op) in operators:
+            return operators[type(node.op)](eval_node(node.operand))
+        if isinstance(node, ast.BinOp) and type(node.op) in operators:
+            return operators[type(node.op)](eval_node(node.left), eval_node(node.right))
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+            func = safe_functions.get(node.func.id)
+            if func and not node.keywords:
+                return func(*(eval_node(arg) for arg in node.args))
+        raise ValueError("不支持的表达式")
+
+    tree = ast.parse(expression, mode="eval")
+    return eval_node(tree)
 
 # ==================== 实时消息回调 ====================
 

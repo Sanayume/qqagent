@@ -19,6 +19,7 @@ from src.agent.llm import FallbackLLM
 from src.memory import MemoryStore
 from src.memory.knowledge import KnowledgeStore
 from src.presets import PresetManager
+from src.session.scheduler import ScheduledMessageStore
 from src.utils.config import Settings, load_settings
 from src.utils.config_loader import get_config_loader, ConfigLoader
 from src.utils.env_loader import get_env_loader
@@ -43,6 +44,7 @@ class BotApp:
         self.config_loader: ConfigLoader | None = None
         self.memory_store: MemoryStore | None = None
         self.knowledge_store: KnowledgeStore | None = None
+        self.scheduler: ScheduledMessageStore | None = None
         self.mcp_manager: MCPManager | None = None
         self.preset_manager: PresetManager | None = None
         self.group_aggregator: MessageAggregator | None = None
@@ -78,6 +80,7 @@ class BotApp:
         self._init_audio_and_context()
         self._init_aggregators()
         self._init_event_handlers()
+        await self.scheduler.start(self.adapter)
         await self._start_admin()
         self._log_startup_banner()
 
@@ -122,6 +125,7 @@ class BotApp:
             agent=self.agent,
             monitor_cfg=tg_cfg.get("monitor", {}),
             broadcast_cfg=tg_cfg.get("broadcast", {}),
+            persona_prompt=self.agent.default_system_prompt if self.agent else "",
         )
 
         log.info("Telegram 监控已启用，随主服务启动")
@@ -184,6 +188,7 @@ class BotApp:
             preset_dir="config/presets",
         )
         self.knowledge_store = KnowledgeStore(db_path="data/knowledge.db")
+        self.scheduler = ScheduledMessageStore(db_path="data/scheduled_messages.db")
 
     async def _init_tools(self) -> list:
         """启动 MCP 并初始化工具注册表，返回启用的工具列表"""
@@ -311,6 +316,42 @@ class BotApp:
                 % ", ".join(restart_required)
             )
 
+    def _apply_aggregator_runtime_settings(self):
+        """同步消息聚合器可热更新参数。"""
+        if not self.pipeline:
+            return
+
+        agg_cfg = self.config_loader.config.aggregator
+        if self.group_aggregator:
+            self.group_aggregator.initial_wait = agg_cfg.get("initial_wait", 10.0)
+            self.group_aggregator.extended_wait = agg_cfg.get("extended_wait", 15.0)
+            self.group_aggregator.density_enabled = agg_cfg.get("density_enabled", False)
+            self.group_aggregator.density_threshold = agg_cfg.get("density_threshold", 10)
+            self.group_aggregator.density_window = agg_cfg.get("density_window", 60.0)
+            self.group_aggregator.density_cooldown = agg_cfg.get("density_cooldown", 60.0)
+
+        priv_cfg = self.config_loader.config.private_aggregator
+        private_enabled = priv_cfg.get("enabled", True)
+        if private_enabled and not self.private_aggregator:
+            self.private_aggregator = MessageAggregator(
+                initial_wait=priv_cfg.get("initial_wait", 3.0),
+                extended_wait=priv_cfg.get("extended_wait", 5.0),
+                on_aggregate=self.pipeline.process_private_aggregated_messages,
+                label="私聊",
+            )
+            if self.ctx:
+                self.ctx.register("private_aggregator", self.private_aggregator)
+        elif private_enabled and self.private_aggregator:
+            self.private_aggregator.initial_wait = priv_cfg.get("initial_wait", 3.0)
+            self.private_aggregator.extended_wait = priv_cfg.get("extended_wait", 5.0)
+        elif not private_enabled and self.private_aggregator:
+            if self._main_loop:
+                self._main_loop.create_task(self.private_aggregator.flush_all())
+            self.private_aggregator = None
+
+        self.pipeline.set_aggregators(self.group_aggregator, self.private_aggregator)
+        log.info("Aggregator runtime settings refreshed")
+
     def _init_audio_and_context(self):
         """初始化音频处理器和 AppContext"""
         stt_provider = get_stt_provider(self.settings.agent.stt_provider)
@@ -322,6 +363,7 @@ class BotApp:
         self.ctx.register_mcp_manager(self.mcp_manager)
         self.ctx.register_adapter(self.adapter)
         self.ctx.register_memory_store(self.memory_store)
+        self.ctx.register("scheduler", self.scheduler)
         self.ctx.register("bot_app", self)
 
         self.pipeline = MessagePipeline(self.adapter, self.agent, self.ctx, self.settings, self.audio)
@@ -389,6 +431,8 @@ class BotApp:
             await self.group_aggregator.flush_all()
         if self.private_aggregator:
             await self.private_aggregator.flush_all()
+        if self.scheduler:
+            await self.scheduler.stop()
         if self.adapter:
             await self.adapter.stop()
         if self.mcp_manager:
@@ -408,30 +452,35 @@ class BotApp:
 
     def _handle_env_reload(self):
         """在主事件循环中处理 .env 热更新。"""
-        previous_settings = self.settings
-        self.settings = load_settings()
+        try:
+            previous_settings = self.settings
+            self.settings = load_settings()
 
-        if not previous_settings or self.settings.log_level != previous_settings.log_level:
-            setup_logger(level=self.settings.log_level)
-            log.info(f"Logger level updated: {self.settings.log_level}")
+            if not previous_settings or self.settings.log_level != previous_settings.log_level:
+                setup_logger(level=self.settings.log_level)
+                log.info(f"Logger level updated: {self.settings.log_level}")
 
-        self._apply_agent_behavior_settings()
-        self._refresh_audio_runtime()
-        self._apply_onebot_runtime_settings(previous_settings)
+            self._apply_agent_behavior_settings()
+            self._refresh_audio_runtime()
+            self._apply_onebot_runtime_settings(previous_settings)
 
-        new_api_key = os.getenv("OPENAI_API_KEY", "")
-        new_base_url = os.getenv("OPENAI_API_BASE", "")
-        new_model = os.getenv("DEFAULT_MODEL", self.settings.llm.default_model)
+            new_api_key = os.getenv("OPENAI_API_KEY", "")
+            new_base_url = os.getenv("OPENAI_API_BASE", "")
+            new_model = os.getenv("DEFAULT_MODEL", self.settings.llm.default_model)
 
-        if new_api_key != self.agent.api_key or new_base_url != self.agent.base_url or new_model != self.agent.model:
-            self._refresh_agent_runtime(
-                reason=".env changed",
-                api_key=new_api_key,
-                base_url=new_base_url,
-                model=new_model,
-            )
-        else:
-            self._refresh_agent_runtime(reason=".env changed")
+            if new_api_key != self.agent.api_key or new_base_url != self.agent.base_url or new_model != self.agent.model:
+                self._refresh_agent_runtime(
+                    reason=".env changed",
+                    api_key=new_api_key,
+                    base_url=new_base_url,
+                    model=new_model,
+                )
+            else:
+                self._refresh_agent_runtime(reason=".env changed")
+            self._record_runtime_event("env_reload", "ok", ".env applied")
+        except Exception as e:
+            self._record_runtime_event("env_reload", "error", str(e))
+            log_error(e, context=".env 热更新", show_traceback=True)
 
     def on_config_reload(self, config):
         """当 config.yaml 发生变化时，刷新 Agent 运行时配置。"""
@@ -440,7 +489,22 @@ class BotApp:
 
     def _handle_config_reload(self):
         """在主事件循环中处理 config.yaml 热更新。"""
-        self._refresh_agent_runtime(reason="config.yaml changed")
+        try:
+            previous_settings = self.settings
+            self.settings = load_settings()
+            if not previous_settings or self.settings.log_level != previous_settings.log_level:
+                setup_logger(level=self.settings.log_level)
+                log.info(f"Logger level updated: {self.settings.log_level}")
+
+            self._apply_agent_behavior_settings()
+            self._refresh_audio_runtime()
+            self._apply_onebot_runtime_settings(previous_settings)
+            self._apply_aggregator_runtime_settings()
+            self._refresh_agent_runtime(reason="config.yaml changed")
+            self._record_runtime_event("config_reload", "ok", "config.yaml applied")
+        except Exception as e:
+            self._record_runtime_event("config_reload", "error", str(e))
+            log_error(e, context="config.yaml 热更新", show_traceback=True)
 
     def _refresh_agent_runtime(
         self,
@@ -536,6 +600,18 @@ class BotApp:
                 "monitor_keywords": list(tg_cfg.get("monitor", {}).get("keywords", [])),
             },
             "reloads": self._runtime_events,
+            "scheduler": self.scheduler.get_stats() if self.scheduler else {},
+            "config": {
+                "path": str(self.config_loader.config_path) if self.config_loader else "config.yaml",
+                "hot_reload": {
+                    "agent": True,
+                    "llm": True,
+                    "onebot_credentials": True,
+                    "aggregators": True,
+                    "telegram": False,
+                    "admin_port": False,
+                },
+            },
             "behavior": {
                 "allow_at": self.allow_at,
                 "allow_private": self.allow_private,

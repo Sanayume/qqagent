@@ -8,6 +8,12 @@ admin:
   password: admin123
   port: 8088
   secret_key: change-me-to-a-random-string
+  cors_origins:
+    - "http://127.0.0.1:8088"
+    - "http://localhost:8088"
+    - "http://127.0.0.1:5173"
+    - "http://localhost:5173"
+  allow_query_token: false
 
 aggregator:
   initial_wait: 20.0
@@ -67,6 +73,10 @@ telegram:
     aggregate_seconds: 60
     cooldown_seconds: 300
     summarize: true
+    max_buffer_messages: 50
+    dedupe_seconds: 300
+    store_raw: true
+    persona_prompt: ""
   broadcast:
     tg_self: false
     qq_groups: []

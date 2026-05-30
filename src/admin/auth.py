@@ -10,6 +10,9 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import JWTError, jwt
 from pydantic import BaseModel
 
+from src.admin.security import get_admin_security_warnings
+from src.utils.logger import log
+
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24
 
@@ -46,6 +49,10 @@ def create_access_token(username: str, expires_delta: Optional[timedelta] = None
         "exp": expire,
         "iat": datetime.utcnow(),
     }
+    from src.utils.config_loader import get_config_loader
+
+    for warning in get_admin_security_warnings(get_config_loader().config.admin):
+        log.warning(f"Admin security warning: {warning}")
     return jwt.encode(payload, _get_secret_key(), algorithm=ALGORITHM)
 
 

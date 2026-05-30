@@ -566,6 +566,29 @@ class OneBotAdapter:
         Returns:
             API 响应
         """
+        target_type = "group" if event.group_id else "private"
+        target_id = event.group_id if event.group_id else event.user_id
+        return await self.send_rich_to_target(
+            target_type=target_type,
+            target_id=target_id,
+            text=text,
+            image=image,
+            record=record,
+            at_users=at_users,
+            reply_to=reply_to,
+        )
+
+    async def send_rich_to_target(
+        self,
+        target_type: str,
+        target_id: int,
+        text: str = "",
+        image: str = "",
+        record: str = "",
+        at_users: list[int] | None = None,
+        reply_to: int = 0,
+    ) -> dict:
+        """发送富文本消息到指定群或私聊目标。"""
         segments = []
 
         # 1. 回复（必须在最前面）
@@ -597,26 +620,39 @@ class OneBotAdapter:
         if record:
             # 先发文本/图片部分
             if segments:
-                await self.send_msg(event, segments)
+                await self._send_to_target(target_type, target_id, segments)
                 segments = []
             # 发送语音（自动切分超长音频）
-            await self._send_record(event, record)
+            await self._send_record_to_target(target_type, target_id, record)
 
         if not segments:
             if not record:
                 log.warning("send_rich_msg: 空消息，跳过")
             return {"status": "ok", "data": None}
 
-        return await self.send_msg(event, segments)
+        return await self._send_to_target(target_type, target_id, segments)
+
+    async def _send_to_target(self, target_type: str, target_id: int, message: str | list) -> dict:
+        if target_type == "group":
+            return await self.send_group_msg(target_id, message)
+        if target_type == "private":
+            return await self.send_private_msg(target_id, message)
+        raise ValueError(f"Unsupported target_type: {target_type}")
 
     async def _send_record(self, event: OneBotEvent, record: str):
         """发送语音，超过 55 秒自动切分多条发送"""
+        target_type = "group" if event.group_id else "private"
+        target_id = event.group_id if event.group_id else event.user_id
+        await self._send_record_to_target(target_type, target_id, record)
+
+    async def _send_record_to_target(self, target_type: str, target_id: int, record: str):
+        """发送语音到指定目标，超过 55 秒自动切分多条发送。"""
         from pathlib import Path
         from src.core.media import get_audio_duration, split_audio
 
         # 非本地文件（base64/URL），直接发不切分
         if record.startswith(("base64://", "http://", "https://")):
-            await self.send_msg(event, [{"type": "record", "data": {"file": record}}])
+            await self._send_to_target(target_type, target_id, [{"type": "record", "data": {"file": record}}])
             return
 
         # 解析本地路径
@@ -642,9 +678,9 @@ class OneBotAdapter:
             log.info(f"语音时长 {duration:.1f}s > {max_audio_sec}s，自动切分")
             parts = split_audio(str(p), max_seconds=max_audio_sec)
             for part in parts:
-                await self.send_msg(event, [{"type": "record", "data": {"file": f"file:///{Path(part).resolve()}"}}])
+                await self._send_to_target(target_type, target_id, [{"type": "record", "data": {"file": f"file:///{Path(part).resolve()}"}}])
         else:
-            await self.send_msg(event, [{"type": "record", "data": {"file": file_uri}}])
+            await self._send_to_target(target_type, target_id, [{"type": "record", "data": {"file": file_uri}}])
 
     async def _resolve_image(self, image: str) -> str:
         """解析图片为 base64

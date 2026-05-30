@@ -218,24 +218,29 @@ class MessagePipeline:
             delay_minutes = cmd.get("delay_minutes", 0)
 
             if delay_minutes > 0:
-                async def _delayed_send():
-                    delay_seconds = delay_minutes * 60
-                    log.info(f"定时发送已安排: {delay_minutes}分钟后发送")
-                    await asyncio.sleep(delay_seconds)
-                    try:
-                        await self.adapter.send_rich_msg(
-                            event=event,
-                            text=cmd.get("text", ""),
-                            image=cmd.get("image", ""),
-                            record=cmd.get("record", ""),
-                            at_users=cmd.get("at_users"),
-                            reply_to=cmd.get("reply_to", 0),
-                        )
-                        log.info("定时消息发送成功")
-                    except Exception as e:
-                        log.warning(f"定时消息发送失败: {e}")
+                scheduler = self.ctx.get("scheduler")
+                if scheduler:
+                    schedule_id = scheduler.schedule_from_event(event, cmd)
+                    log.info(f"定时发送已持久化: id={schedule_id}, {delay_minutes}分钟后发送")
+                else:
+                    async def _delayed_send():
+                        delay_seconds = delay_minutes * 60
+                        log.info(f"定时发送已安排: {delay_minutes}分钟后发送")
+                        await asyncio.sleep(delay_seconds)
+                        try:
+                            await self.adapter.send_rich_msg(
+                                event=event,
+                                text=cmd.get("text", ""),
+                                image=cmd.get("image", ""),
+                                record=cmd.get("record", ""),
+                                at_users=cmd.get("at_users"),
+                                reply_to=cmd.get("reply_to", 0),
+                            )
+                            log.info("定时消息发送成功")
+                        except Exception as e:
+                            log.warning(f"定时消息发送失败: {e}")
 
-                asyncio.run_coroutine_threadsafe(_delayed_send(), loop)
+                    asyncio.run_coroutine_threadsafe(_delayed_send(), loop)
             else:
                 asyncio.run_coroutine_threadsafe(
                     self.adapter.send_rich_msg(
