@@ -41,6 +41,17 @@ class DynamicConfig:
         "initial_wait": 3.0,
         "extended_wait": 5.0,
     })
+
+    # 社交人格运行时
+    social: Dict[str, Any] = field(default_factory=lambda: {
+        "enabled": True,
+        "quiet_hour_start": 1,
+        "quiet_hour_end": 7,
+        "familiar_threshold": 12,
+        "lively_threshold": 4,
+        "recent_window_seconds": 180,
+        "max_prompt_chars": 1400,
+    })
     
     # 提示词预设
     presets: Dict[str, Any] = field(default_factory=dict)
@@ -146,6 +157,7 @@ class ConfigLoader:
             self.config.session = data.get("session", self.config.session)
             self.config.aggregator = data.get("aggregator", self.config.aggregator)
             self.config.private_aggregator = data.get("private_aggregator", self.config.private_aggregator)
+            self.config.social = {**DynamicConfig().social, **data.get("social", {})}
             self.config.presets = data.get("presets", self.config.presets)
             self.config.plugins = data.get("plugins", self.config.plugins)
             self.config.llm = {**DynamicConfig().llm, **data.get("llm", {})}

@@ -28,6 +28,15 @@ private_aggregator:
   initial_wait: 3.0
   extended_wait: 5.0
 
+social:
+  enabled: true
+  quiet_hour_start: 1
+  quiet_hour_end: 7
+  familiar_threshold: 12
+  lively_threshold: 4
+  recent_window_seconds: 180
+  max_prompt_chars: 1400
+
 presets:
   default:
     system_prompt: "Config loaded from YAML!"

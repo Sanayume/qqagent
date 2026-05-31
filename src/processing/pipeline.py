@@ -83,7 +83,7 @@ class MessagePipeline:
                     audio_clips = [converted]
 
         llm_message = build_multimodal_message(text=context_text, images=images, audio=audio_clips)
-        await self._invoke_agent(event, session_id, llm_message)
+        await self._invoke_agent(event, session_id, llm_message, message_count=1, participant_count=1)
 
     async def process_aggregated_messages(
         self,
@@ -110,7 +110,13 @@ class MessagePipeline:
         audio_clips = await self.audio.collect_audio_from_messages(messages) if self.audio.should_use_native_audio() else []
         llm_message = build_multimodal_message(text=context_text, images=images, audio=audio_clips or None)
 
-        await self._invoke_agent(first_event, session_id, llm_message)
+        await self._invoke_agent(
+            first_event,
+            session_id,
+            llm_message,
+            message_count=len(messages),
+            participant_count=len({m.sender_qq for m in messages}),
+        )
 
     async def process_private_aggregated_messages(
         self,
@@ -137,7 +143,13 @@ class MessagePipeline:
         audio_clips = await self.audio.collect_audio_from_messages(messages) if self.audio.should_use_native_audio() else []
         llm_message = build_multimodal_message(text=context_text, images=images, audio=audio_clips or None)
 
-        await self._invoke_agent(first_event, session_id, llm_message)
+        await self._invoke_agent(
+            first_event,
+            session_id,
+            llm_message,
+            message_count=len(messages),
+            participant_count=len({m.sender_qq for m in messages}),
+        )
 
     def set_aggregators(self, group_agg, private_agg):
         """设置聚合器引用（避免循环依赖）"""
@@ -209,7 +221,7 @@ class MessagePipeline:
             session_id = self.adapter.session_manager.get_session_id(
                 user_id=event.user_id, group_id=None, is_private=True,
             )
-            await self._invoke_agent(event, session_id, llm_message)
+            await self._invoke_agent(event, session_id, llm_message, message_count=1, participant_count=1)
 
     def _setup_callbacks(self, event: OneBotEvent, loop):
         """创建并注册实时发送和文件下载回调"""
@@ -295,18 +307,38 @@ class MessagePipeline:
                 except Exception as e:
                     log.debug(f"Failed to send error message to user: {e}")
 
-    async def _invoke_agent(self, event: OneBotEvent, session_id: str, llm_message):
+    async def _invoke_agent(
+        self,
+        event: OneBotEvent,
+        session_id: str,
+        llm_message,
+        message_count: int = 1,
+        participant_count: int = 1,
+    ):
         """调用 Agent 并处理响应"""
         loop = asyncio.get_running_loop()
         self._setup_callbacks(event, loop)
 
         try:
+            system_prompt = None
+            social_runtime = self.ctx.get("social_runtime")
+            if social_runtime:
+                social_prompt = social_runtime.build_prompt(
+                    event,
+                    session_id=session_id,
+                    message_count=message_count,
+                    participant_count=participant_count,
+                )
+                if social_prompt:
+                    system_prompt = f"{self.agent.default_system_prompt}\n\n{social_prompt}"
+
             await self.agent.chat(
                 message=llm_message,
                 session_id=session_id,
                 user_id=event.user_id,
                 group_id=event.group_id,
                 user_name=event.sender_nickname,
+                system_prompt=system_prompt,
             )
             log.info("Agent 处理完成")
             self.ctx.stats.record_message()

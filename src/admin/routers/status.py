@@ -104,6 +104,7 @@ async def get_status():
         "behavior": runtime_status["behavior"],
         "reloads": runtime_status["reloads"],
         "scheduler": runtime_status.get("scheduler", {}),
+        "social": runtime_status.get("social", {}),
         "config": runtime_status.get("config", {}),
         "security": {
             "warnings": get_admin_security_warnings(config_loader.config.admin),

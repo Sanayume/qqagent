@@ -20,6 +20,7 @@ from src.memory import MemoryStore
 from src.memory.knowledge import KnowledgeStore
 from src.presets import PresetManager
 from src.session.scheduler import ScheduledMessageStore
+from src.session.social import SocialRuntime
 from src.utils.config import Settings, load_settings
 from src.utils.config_loader import get_config_loader, ConfigLoader
 from src.utils.env_loader import get_env_loader
@@ -45,6 +46,7 @@ class BotApp:
         self.memory_store: MemoryStore | None = None
         self.knowledge_store: KnowledgeStore | None = None
         self.scheduler: ScheduledMessageStore | None = None
+        self.social_runtime: SocialRuntime | None = None
         self.mcp_manager: MCPManager | None = None
         self.preset_manager: PresetManager | None = None
         self.group_aggregator: MessageAggregator | None = None
@@ -189,6 +191,10 @@ class BotApp:
         )
         self.knowledge_store = KnowledgeStore(db_path="data/knowledge.db")
         self.scheduler = ScheduledMessageStore(db_path="data/scheduled_messages.db")
+        self.social_runtime = SocialRuntime(
+            db_path="data/social_state.db",
+            config=self.config_loader.config.social,
+        )
 
     async def _init_tools(self) -> list:
         """启动 MCP 并初始化工具注册表，返回启用的工具列表"""
@@ -364,6 +370,7 @@ class BotApp:
         self.ctx.register_adapter(self.adapter)
         self.ctx.register_memory_store(self.memory_store)
         self.ctx.register("scheduler", self.scheduler)
+        self.ctx.register("social_runtime", self.social_runtime)
         self.ctx.register("bot_app", self)
 
         self.pipeline = MessagePipeline(self.adapter, self.agent, self.ctx, self.settings, self.audio)
@@ -500,6 +507,8 @@ class BotApp:
             self._refresh_audio_runtime()
             self._apply_onebot_runtime_settings(previous_settings)
             self._apply_aggregator_runtime_settings()
+            if self.social_runtime:
+                self.social_runtime.update_config(self.config_loader.config.social)
             self._refresh_agent_runtime(reason="config.yaml changed")
             self._record_runtime_event("config_reload", "ok", "config.yaml applied")
         except Exception as e:
@@ -601,6 +610,7 @@ class BotApp:
             },
             "reloads": self._runtime_events,
             "scheduler": self.scheduler.get_stats() if self.scheduler else {},
+            "social": self.social_runtime.get_stats() if self.social_runtime else {},
             "config": {
                 "path": str(self.config_loader.config_path) if self.config_loader else "config.yaml",
                 "hot_reload": {
@@ -608,6 +618,7 @@ class BotApp:
                     "llm": True,
                     "onebot_credentials": True,
                     "aggregators": True,
+                    "social": True,
                     "telegram": False,
                     "admin_port": False,
                 },
@@ -776,6 +787,8 @@ class BotApp:
         parsed = parse_segments(segments)
 
         text_desc, plain_text, sender = self._log_incoming_message(event, parsed, segments)
+        if self.social_runtime:
+            self.social_runtime.observe_message(event, plain_text, sender)
 
         if not self._should_respond(event, plain_text):
             return

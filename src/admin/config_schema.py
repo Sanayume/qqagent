@@ -182,6 +182,20 @@ CONFIG_SCHEMA = [
         ],
     },
     {
+        "key": "social",
+        "title": "Social Runtime",
+        "description": "Lightweight social state for more natural replies.",
+        "fields": [
+            {"key": "enabled", "label": "Enabled", "type": "bool", "help": "Inject social context into replies."},
+            {"key": "quiet_hour_start", "label": "Quiet Hour Start", "type": "int", "help": "Hour when low-energy night style begins."},
+            {"key": "quiet_hour_end", "label": "Quiet Hour End", "type": "int", "help": "Hour when low-energy night style ends."},
+            {"key": "familiar_threshold", "label": "Familiar Threshold", "type": "int", "help": "Messages before a user is treated as familiar."},
+            {"key": "lively_threshold", "label": "Lively Threshold", "type": "int", "help": "Recent messages before chat is treated as lively."},
+            {"key": "recent_window_seconds", "label": "Recent Window Seconds", "type": "int", "help": "Window for chat activity detection."},
+            {"key": "max_prompt_chars", "label": "Max Prompt Chars", "type": "int", "help": "Maximum hidden social prompt length."},
+        ],
+    },
+    {
         "key": "llm",
         "title": "LLM Provider + Fallback",
         "description": "???????????????????? config.yaml?",
@@ -305,6 +319,7 @@ def build_default_config() -> dict[str, Any]:
         "session": deepcopy(dynamic.session),
         "aggregator": deepcopy(dynamic.aggregator),
         "private_aggregator": deepcopy(dynamic.private_aggregator),
+        "social": deepcopy(dynamic.social),
         "llm": deepcopy(LLM_DEFAULTS),
         "embeddings": deepcopy(EMBEDDINGS_DEFAULTS),
         "telegram": deepcopy(TELEGRAM_DEFAULTS),
@@ -501,6 +516,14 @@ FIELD_EFFECTS: dict[str, dict[str, str]] = {
     "private_aggregator.enabled": {"kind": "restart", "label": "Restart Required", "detail": "Private aggregators are created only during startup."},
     "private_aggregator.initial_wait": {"kind": "restart", "label": "Restart Required", "detail": "Private aggregators are created only during startup."},
     "private_aggregator.extended_wait": {"kind": "restart", "label": "Restart Required", "detail": "Private aggregators are created only during startup."},
+
+    "social.enabled": {"kind": "hot_reload", "label": "Hot Reload", "detail": "Social runtime updates immediately."},
+    "social.quiet_hour_start": {"kind": "hot_reload", "label": "Hot Reload", "detail": "Social runtime updates immediately."},
+    "social.quiet_hour_end": {"kind": "hot_reload", "label": "Hot Reload", "detail": "Social runtime updates immediately."},
+    "social.familiar_threshold": {"kind": "hot_reload", "label": "Hot Reload", "detail": "Social runtime updates immediately."},
+    "social.lively_threshold": {"kind": "hot_reload", "label": "Hot Reload", "detail": "Social runtime updates immediately."},
+    "social.recent_window_seconds": {"kind": "hot_reload", "label": "Hot Reload", "detail": "Social runtime updates immediately."},
+    "social.max_prompt_chars": {"kind": "hot_reload", "label": "Hot Reload", "detail": "Social runtime updates immediately."},
 
     "llm.default_model": {"kind": "hot_reload", "label": "Hot Reload", "detail": "Agent runtime is rebuilt with the new primary model immediately."},
     "llm.openai_api_base": {"kind": "hot_reload", "label": "Hot Reload", "detail": "Agent runtime is rebuilt with the new base URL immediately."},
